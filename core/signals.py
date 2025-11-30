@@ -34,6 +34,9 @@ def _apply_filters_for_signal(
     rsi_val: float,
     macd_val: float,
     macd_sig_val: float,
+    ema_fast_val: Optional[float] = None,
+    ema_slow_val: Optional[float] = None,
+    price_last: Optional[float] = None,
 ) -> bool:
     """
     Применяем цепочку фильтров 1.1 (EMA / volume / news) к сигналу.
@@ -50,9 +53,10 @@ def _apply_filters_for_signal(
         "rsi": float(rsi_val),
         "macd": float(macd_val),
         "macd_sig": float(macd_sig_val),
-        # заглушки для EMA-фильтра (на 1.1 — пока без реальных значений)
-        "ema_fast": None,
-        "ema_slow": None,
+        # реальные значения EMA-фильтра (если есть)
+        "ema_fast": float(ema_fast_val) if ema_fast_val is not None else None,
+        "ema_slow": float(ema_slow_val) if ema_slow_val is not None else None,
+        "price_last": float(price_last) if price_last is not None else None,
         # заглушки для фильтра по объёму
         "quote_volume_24h": None,
         "best_bid": None,
@@ -207,6 +211,9 @@ def simple_rsi_macd_signal(
     rsi_overbought: float = 70.0,
     rsi_oversold: float = 30.0,
     symbol: Optional[str] = None,
+    ema_fast_last: Optional[float] = None,
+    ema_slow_last: Optional[float] = None,
+    price_last: Optional[float] = None,
 ) -> Optional[SimpleSignal]:
     """Обёртка над simple_rsi_macd для использования из UI.
 
@@ -240,7 +247,15 @@ def simple_rsi_macd_signal(
 
     # --- фильтры 1.1: EMA / volume / news ---
     try:
-        ok = _apply_filters_for_signal(symbol, rsi_val, macd_val, macd_sig_val)
+        ok = _apply_filters_for_signal(
+            symbol,
+            rsi_val,
+            macd_val,
+            macd_sig_val,
+            ema_fast_last,
+            ema_slow_last,
+            price_last,
+        )
         if not ok:
             # фильтры не пропускают сигнал — принудительно HOLD
             data = dict(data)

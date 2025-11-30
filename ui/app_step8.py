@@ -1382,6 +1382,28 @@ class App(tk.Tk):
         else:
             self.label_macd.configure(text=f"MACD: {macd_last:+.4f}")
 
+        # --- compute EMA20 / EMA50 for filters ---
+        ema_fast_last = None
+        ema_slow_last = None
+        price_last = None
+
+        if prices:
+            try:
+                price_last = float(prices[-1])
+            except Exception:
+                price_last = None
+
+        if INDICATORS is not None and prices:
+            try:
+                ema_fast_series = INDICATORS.ema(prices, period=20)
+                ema_slow_series = INDICATORS.ema(prices, period=50)
+                if ema_fast_series:
+                    ema_fast_last = float(ema_fast_series[-1])
+                if ema_slow_series:
+                    ema_slow_last = float(ema_slow_series[-1])
+            except Exception as e:  # noqa: BLE001
+                self._log(f"[DIAG] EMA error: {e!r}")
+
         # --- reset signal / recommendation labels ---
         try:
             self.label_signal.configure(text="Signal: n/a")
@@ -1405,6 +1427,9 @@ class App(tk.Tk):
             macd_last,
             macd_signal_last,
             symbol=sym,
+            ema_fast_last=ema_fast_last,
+            ema_slow_last=ema_slow_last,
+            price_last=price_last,
         )
         if sig is None:
             return
