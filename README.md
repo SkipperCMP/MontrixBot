@@ -10,7 +10,7 @@ python smoke_run.py
 python health_monitor.py
 
 # 3) UI (SIM + SAFE by default)
-python ui/app_step8.py
+python scripts/run_ui.py
 ```
 
 ## Patch Mode (Windows)
