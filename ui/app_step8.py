@@ -1,4 +1,4 @@
-# MontrixBot 1.2-pre1 STEP1.15D_SIM_OK (UI + AutoSim + StateEngine)
+# MontrixBot_STEP1.1_(UI PRO foundation)
 # UI-лаунчер с:
 #  - Buy/Close/Panic через scripts/real_*_market.py
 #  - SAFE-индикатором

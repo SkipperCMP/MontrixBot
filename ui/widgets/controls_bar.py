@@ -8,137 +8,118 @@ from tkinter import ttk
 
 
 def build_topbar_ui(app: Any, symbols: Sequence[str]) -> None:
-    """Строит верхнюю панель управления (symbol/qty/кнопки/бейджи/мини-equity/индикаторы)."""
+    """Строит верхнюю панель управления.
+
+    Лево: Symbol / Qty / BUY / Close / Panic / Mode / SAFE / Dry-Run.
+    Право: индикаторы Signal / Recommendation / MACD / RSI.
+    """
 
     top = ttk.Frame(app, style="Dark.TFrame")
     top.pack(fill="x", padx=8, pady=6)
 
-    # --- левый блок: Symbol + Qty + Preview/Clear ---
-    ttk.Label(top, text="Symbol:", style="Dark.TLabel").pack(
-        side="left", padx=(4, 4)
-    )
+    # --- левый блок: Symbol + Qty + кнопки ---
+    left_box = ttk.Frame(top, style="Dark.TFrame")
+    left_box.pack(side="left", padx=(4, 4))
 
-    app.combo = ttk.Combobox(
-        top,
-        values=list(symbols),
+    lbl_sym = ttk.Label(left_box, text="Symbol:", style="Dark.TLabel")
+    lbl_sym.pack(side="left", padx=(0, 4))
+
+    values = list(symbols) if symbols else []
+    if not hasattr(app, "var_symbol"):
+        app.var_symbol = tk.StringVar(value=values[0] if values else "")
+    app.cmb_symbol = ttk.Combobox(
+        left_box,
         textvariable=app.var_symbol,
+        values=values,
         width=12,
         state="readonly",
+        style="ComboDark.TCombobox",
     )
-    app.combo.pack(side="left", padx=(0, 12))
+    app.cmb_symbol.pack(side="left", padx=(0, 8))
 
-    ttk.Label(top, text="Qty:", style="Dark.TLabel").pack(side="left")
+    lbl_qty = ttk.Label(left_box, text="Qty:", style="Dark.TLabel")
+    lbl_qty.pack(side="left", padx=(0, 4))
 
+    if not hasattr(app, "var_qty"):
+        app.var_qty = tk.StringVar(value="0.0")
     app.entry_qty = ttk.Entry(
-        top,
+        left_box,
         textvariable=app.var_qty,
-        width=8,
+        width=10,
         style="EntryDark.TEntry",
     )
-    app.entry_qty.pack(side="left", padx=(4, 12))
+    app.entry_qty.pack(side="left", padx=(0, 8))
 
-    app.btn_preview = ttk.Button(
-        top,
-        text="Preview",
-        style="Dark.TButton",
-        command=app.on_preview,
-    )
-    app.btn_preview.pack(side="left", padx=2)
+    # --- кнопки BUY / Close / Panic ---
+    buy_cmd = getattr(app, "on_buy_sim", None) or (lambda: None)
+    close_cmd = getattr(app, "on_close_sim", None) or (lambda: None)
+    panic_cmd = getattr(app, "on_panic", None) or (lambda: None)
 
-    app.btn_clear = ttk.Button(
-        top,
-        text="Clear log",
-        style="Dark.TButton",
-        command=app.clear_log,
-    )
-    app.btn_clear.pack(side="left", padx=2)
-
-    # --- блок Buy / Close / Panic ---
-    # команды для Buy/Close навешиваются позже в _set_mode()
     app.btn_buy = ttk.Button(
-        top,
-        text="Buy (Market)",
+        left_box,
+        text="BUY",
         style="Dark.TButton",
+        command=buy_cmd,
     )
-    app.btn_buy.pack(side="left", padx=6)
+    app.btn_buy.pack(side="left", padx=2)
 
     app.btn_close = ttk.Button(
-        top,
+        left_box,
         text="Close",
         style="Dark.TButton",
+        command=close_cmd,
     )
     app.btn_close.pack(side="left", padx=2)
 
     app.btn_panic = ttk.Button(
-        top,
+        left_box,
         text="Panic",
         style="Dark.TButton",
-        command=app.on_panic,
+        command=panic_cmd,
     )
     app.btn_panic.pack(side="left", padx=2)
 
     # --- переключатель SIM/REAL ---
-    if not hasattr(app, "var_mode") or not isinstance(
-        getattr(app, "var_mode"), tk.StringVar
-    ):
-        app.var_mode = tk.StringVar(value="Mode: SIM")
+    if not hasattr(app, "_mode"):
+        app._mode = "SIM"
 
+    if not hasattr(app, "var_mode"):
+        app.var_mode = tk.StringVar(value=f"Mode: {app._mode}")
+
+    toggle_mode_cmd = getattr(app, "_toggle_mode", None) or (lambda: None)
     app.btn_mode = ttk.Button(
-        top,
+        left_box,
         textvariable=app.var_mode,
         style="Dark.TButton",
-        command=app._toggle_mode,
+        command=toggle_mode_cmd,
     )
-    app.btn_mode.pack(side="left", padx=(18, 4))
+    app.btn_mode.pack(side="left", padx=(8, 4))
 
-    # --- бейджи Dry-Run / SAFE ---
-    app.badge_dry = ttk.Label(top, text="Dry-Run", style="BadgeWarn.TLabel")
-    app.badge_dry.pack(side="left", padx=(0, 6))
+    # --- бейдж SAFE ---
+    badge_safe = ttk.Label(
+        left_box,
+        text="SAFE",
+        style="BadgeSafe.TLabel",
+        cursor="hand2",
+    )
+    badge_safe.pack(side="left", padx=(4, 4))
+    if hasattr(app, "_toggle_safe"):
+        badge_safe.bind("<Button-1>", lambda e: app._toggle_safe())
+    app.badge_safe = badge_safe
 
-    app.badge_safe = ttk.Label(top, text="SAFE", style="BadgeSafe.TLabel")
-    app.badge_safe.pack(side="left", padx=(0, 0))
+    # --- бейдж Dry-Run / REAL CLI ---
+    badge_dry = ttk.Label(
+        left_box,
+        text="Dry-Run",
+        style="BadgeWarn.TLabel",
+        cursor="hand2",
+    )
+    badge_dry.pack(side="left", padx=(0, 4))
+    if hasattr(app, "_toggle_dry"):
+        badge_dry.bind("<Button-1>", lambda e: app._toggle_dry())
+    app.badge_dry = badge_dry
 
-    # хинты/подсказки по бейджам
-    app.badge_dry.bind(
-        "<Enter>",
-        lambda e: app._set_status("Dry-Run = CLI-скрипты с подтверждением (--ask)"),
-    )
-    app.badge_dry.bind(
-        "<Leave>",
-        lambda e: app._set_status(""),
-    )
-    app.badge_dry.bind(
-        "<Button-1>",
-        lambda e: app._toggle_dry(),
-    )
-
-    app.badge_safe.bind(
-        "<Enter>",
-        lambda e: app._set_status("SAFE = блокировка реальных ордеров"),
-    )
-    app.badge_safe.bind(
-        "<Leave>",
-        lambda e: app._set_status(""),
-    )
-    app.badge_safe.bind(
-        "<Button-1>",
-        lambda e: app._toggle_safe(),
-    )
-
-    # --- mini equity bar ---
-    if not hasattr(app, "var_equity") or not isinstance(
-        getattr(app, "var_equity"), tk.StringVar
-    ):
-        app.var_equity = tk.StringVar(value="Equity: —")
-
-    lbl_equity = ttk.Label(
-        top,
-        textvariable=app.var_equity,
-        style="Dark.TLabel",
-    )
-    lbl_equity.pack(side="left", padx=(4, 8))
-
-    # --- правый блок: индикаторы рекомендации/сигнала/RSI/MACD ---
+    # --- правый блок: сигналы / индикаторы ---
     right_box = ttk.Frame(top, style="Dark.TFrame")
     right_box.pack(side="right", padx=(4, 4))
 

@@ -9,53 +9,75 @@ from tkinter import ttk
 def build_log_ui(app: Any, StatusBar: Any) -> None:
     """Основная лог-панель + LastSig + StatusBar.
 
-    Создаёт:
-    - self.label_last_sig
-    - self.log
-    - self.status_bar
+    Создаёт на `app`:
+    - label_last_sig  — строка с последним сигналом
+    - log             — tk.Text для основного лога
+    - status_bar      — экземпляр StatusBar (если класс передан)
     """
 
+    # Корневой фрейм лога
     frm = ttk.Frame(app, style="Log.TFrame")
-    frm.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+    frm.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
-    ttk.Label(
-        frm,
-        text="Log",
+    # ------------------------------------------------------------------ top row: Last signal + buttons
+    top = ttk.Frame(frm, style="Log.TFrame")
+    top.pack(fill="x", pady=(0, 4))
+
+    app.label_last_sig = ttk.Label(
+        top,
+        text="Last signal: —",
         style="Muted.TLabel",
-        background="#121417",
-    ).pack(anchor="w")
-
-    # панель LastSig под заголовком лога
-    try:
-        app.label_last_sig = ttk.Label(
-            frm,
-            text="LastSig: n/a",
-            style="Muted.TLabel",
-            background="#121417",
-        )
-        app.label_last_sig.pack(anchor="w")
-    except Exception:
-        # в случае любых проблем с ttk просто продолжаем без панели
-        app.label_last_sig = None
-
-    app.log = tk.Text(
-        frm,
-        height=20,
-        bg="#121417",
-        fg="#cdd6f4",
-        relief="flat",
     )
-    try:
-        app.log.configure(font=("Consolas", 9))
-    except Exception:
-        pass
-    app.log.pack(fill="both", expand=True, pady=(2, 0))
+    app.label_last_sig.pack(side="left", padx=(4, 4))
 
-    # Status bar (heartbeat / lag / last deal)
+    # Кнопка очистки лога
+    clear_cmd = getattr(app, "clear_log", None)
+    if clear_cmd is None:
+        clear_cmd = lambda: None
+
+    btn_clear = ttk.Button(
+        top,
+        text="Clear log",
+        style="Dark.TButton",
+        command=clear_cmd,
+    )
+    btn_clear.pack(side="right", padx=(4, 6))
+
+    # ------------------------------------------------------------------ middle: Text + scrollbar
+    mid = ttk.Frame(frm, style="Log.TFrame")
+    mid.pack(fill="both", expand=True)
+
+    scrollbar = ttk.Scrollbar(mid, orient="vertical")
+    scrollbar.pack(side="right", fill="y")
+
+    log = tk.Text(
+        mid,
+        wrap="none",
+        height=12,
+        background="#121417",
+        foreground="#e6e6e6",
+        insertbackground="#e6e6e6",
+        yscrollcommand=scrollbar.set,
+    )
+    scrollbar.configure(command=log.yview)
+
+    try:
+        log.configure(font=("Consolas", 9))
+    except Exception:
+        # Если шрифт недоступен – просто игнорируем
+        pass
+
+    log.pack(side="left", fill="both", expand=True, pady=(2, 0))
+
+    app.log = log
+
+    # ------------------------------------------------------------------ bottom: Status bar
     app.status_bar = None
     if StatusBar is not None:
         try:
-            app.status_bar = StatusBar(frm)
-            app.status_bar.frame.pack(fill="x", side="bottom")
+            sb = StatusBar(frm)
+            sb.frame.pack(fill="x", side="bottom")
+            app.status_bar = sb
         except Exception:
+            # Не даём упасть всему UI из-за статуса
             app.status_bar = None
