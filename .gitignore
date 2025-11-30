@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+
+# Виртуальные окружения
+venv/
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Логи и временные файлы
+*.log
+logs/
+tmp/
+*.tmp
+
+# Runtime данных MontrixBot (логи работы, не код)
+runtime/*.jsonl
+runtime/*.log
+runtime/*.csv
+runtime/state*.json
+runtime/exchange_info*.json
+
+# Бэкапы/архи
+*.zip
+*.bak

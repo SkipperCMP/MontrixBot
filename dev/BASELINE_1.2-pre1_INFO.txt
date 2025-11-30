@@ -1,0 +1,12 @@
+MontrixBot 1.2-pre1 BASELINE clean
+
+This archive is a cleaned baseline derived from MontrixBot_1.1-SIGNALS_1.1.2-polish2-fixed:
+
+- Removed all __pycache__ folders and .pyc files.
+- Moved patch notes, multi-step READMEs and docs/* under dev/.
+- Moved runtime logs and snapshots (json/jsonl, safe_unlock.key, exchange_info snapshot) under dev/runtime_snapshot/.
+- Moved user .env with real keys to dev/archive/env_user_snapshot.env.
+- Kept .env.example, core/, ui/, tools/, scripts/, telegram/, runtime/ code and configs.
+- Updated VERSION to 1.2-pre1.
+
+Use this as the starting point for 1.2-pre1 development.
