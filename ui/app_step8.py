@@ -499,7 +499,7 @@ class App(tk.Tk):
     def _update_active_from_sim(self, snapshot: dict) -> None:
         """Update Active position panel.
 
-        1) Пытаемся взять позиции из ядра (UIAPI.get_state_snapshot -> positions + ticks).
+        1) Пытаемся взять позиции и recent-сигналы из ядра (UIAPI.get_state_snapshot).
         2) Если там пусто/ошибка — используем snapshot["active"] от AUTOSIM, как раньше.
         3) Для каждой позиции подтягиваем последнее решение ReplaceLogic (Act/Conf) по symbol.
         """
@@ -512,14 +512,16 @@ class App(tk.Tk):
         except Exception:
             autosim_active = []
 
-        # --- пробуем собрать active из ядра (TPSL + StateEngine) ---
+        # --- пробуем собрать active + signals_recent из ядра ---
         core_active = []
+        core_signals_recent = []
         try:
             api = self._ensure_uiapi()
             if api is not None and hasattr(api, "get_state_snapshot"):
                 se_snap = api.get_state_snapshot() or {}
                 positions = se_snap.get("positions") or {}
                 ticks = se_snap.get("ticks") or {}
+                core_signals_recent = se_snap.get("signals_recent") or []
 
                 for sym, pos in positions.items():
                     try:
@@ -562,19 +564,29 @@ class App(tk.Tk):
                         continue
         except Exception:
             core_active = []
+            core_signals_recent = []
 
-        # --- выбираем источник: ядро > AUTOSIM ---
+        # --- выбираем источник позиций: ядро > AUTOSIM ---
         if core_active:
             active = core_active
         else:
             active = autosim_active
 
+        # --- источник recent-сигналов: ядро > snapshot (на всякий случай) ---
+        signals_recent = []
+        if core_signals_recent:
+            signals_recent = core_signals_recent
+        else:
+            try:
+                signals_recent = snapshot.get("signals_recent") or []
+            except Exception:
+                signals_recent = []
+
         # --- последние решения ReplaceLogic по символам (из signals_recent) ---
         last_decisions = {}
         try:
-            rows = snapshot.get("signals_recent") or []
-            if isinstance(rows, list):
-                for row in rows:
+            if isinstance(signals_recent, list):
+                for row in signals_recent:
                     try:
                         sym = str(row.get("symbol", "") or "").upper()
                         if not sym:
@@ -582,7 +594,9 @@ class App(tk.Tk):
 
                         action = str(row.get("action", "") or "").lower()
                         # если нет decision_confidence, используем силу сигнала
-                        conf = row.get("decision_confidence", row.get("signal_strength", 0.0))
+                        conf = row.get(
+                            "decision_confidence", row.get("signal_strength", 0.0)
+                        )
                         try:
                             conf_f = float(conf)
                         except Exception:
