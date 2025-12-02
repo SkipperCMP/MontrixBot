@@ -1,4 +1,4 @@
-# MontrixBot_STEP1.1_(UI PRO foundation)
+# MontrixBot_STEP1.2.1_ReplaceLogic_BASELINE
 # UI-лаунчер с:
 #  - Buy/Close/Panic через scripts/real_*_market.py
 #  - SAFE-индикатором
@@ -1557,6 +1557,22 @@ class App(tk.Tk):
                         )
                         or 0.0
                     )
+                # --- NEW 1.2.1: ReplaceLogic decision ---
+                try:
+                    from core.replace_logic import decide_from_signal_and_reco
+
+                    decision = decide_from_signal_and_reco(d, reco)
+
+                    rec["action"] = decision.action
+                    rec["decision_side"] = decision.side
+                    rec["decision_confidence"] = float(
+                        getattr(decision, "confidence", 0.0) or 0.0
+                )
+                    rec["decision_reason"] = str(getattr(decision, "reason", ""))
+
+                except Exception:
+                    # Любые ошибки ReplaceLogic не должны ломать UI
+                    pass
 
                 # NEW: добавляем сигнал в буфер UIAPI (recent_signals)
                 try:
