@@ -1,4 +1,4 @@
-# MontrixBot_STEP1.2.1_ReplaceLogic_BASELINE
+# MontrixBot
 # UI-лаунчер с:
 #  - Buy/Close/Panic через scripts/real_*_market.py
 #  - SAFE-индикатором
@@ -501,7 +501,10 @@ class App(tk.Tk):
 
         1) Пытаемся взять позиции из ядра (UIAPI.get_state_snapshot -> positions + ticks).
         2) Если там пусто/ошибка — используем snapshot["active"] от AUTOSIM, как раньше.
+        3) Для каждой позиции подтягиваем последнее решение ReplaceLogic (Act/Conf) по symbol.
         """
+
+        snapshot = snapshot or {}
 
         # --- базовый active от AUTOSIM (старое поведение) ---
         try:
@@ -566,12 +569,46 @@ class App(tk.Tk):
         else:
             active = autosim_active
 
+        # --- последние решения ReplaceLogic по символам (из signals_recent) ---
+        last_decisions = {}
+        try:
+            rows = snapshot.get("signals_recent") or []
+            if isinstance(rows, list):
+                for row in rows:
+                    try:
+                        sym = str(row.get("symbol", "") or "").upper()
+                        if not sym:
+                            continue
+
+                        action = str(row.get("action", "") or "").lower()
+                        # если нет decision_confidence, используем силу сигнала
+                        conf = row.get("decision_confidence", row.get("signal_strength", 0.0))
+                        try:
+                            conf_f = float(conf)
+                        except Exception:
+                            conf_f = 0.0
+
+                        last_decisions[sym] = {
+                            "action": action,
+                            "confidence": conf_f,
+                        }
+                    except Exception:
+                        continue
+        except Exception:
+            last_decisions = {}
+
         if not active:
             self._set_active_text("— no active positions —")
             return
 
         def _format_hold(hold_days: float) -> str:
-            """Преобразовать количество дней в человекочитаемый формат."""
+            """
+            Форматирование времени удержания в виде:
+                - HH:MM      (если меньше суток)
+                - 1d HH:MM   (если есть целые дни)
+
+            hold_days — число дней (может быть дробным).
+            """
             try:
                 total_minutes = int(float(hold_days) * 24 * 60)
             except Exception:
@@ -592,7 +629,7 @@ class App(tk.Tk):
             return f"{days}d {hours:02d}:{minutes:02d}"
 
         lines: list[str] = []
-        header = "{:<10} {:<6} {:>9} {:>10} {:>10} {:>10} {:>7} {:>10} {:>10} {:>9}".format(
+        header = "{:<10} {:<6} {:>9} {:>10} {:>10} {:>10} {:>7} {:>10} {:>10} {:>9} {:>5} {:>6}".format(
             "Symbol",
             "Side",
             "Qty",
@@ -603,6 +640,8 @@ class App(tk.Tk):
             "TP",
             "SL",
             "Hold",
+            "Act",
+            "Conf",
         )
         lines.append(header)
         lines.append("-" * len(header))
@@ -643,9 +682,27 @@ class App(tk.Tk):
             hold_days = float(pos.get("hold_days", 0.0) or 0.0)
             hold_str = _format_hold(hold_days)
 
+            # --- последние решения ReplaceLogic по этому символу ---
+            sym_u = symbol.upper()
+            dec = last_decisions.get(sym_u) or {}
+            action_raw = str(dec.get("action", "") or "")
+            if action_raw == "buy":
+                act_str = "B"
+            elif action_raw == "close":
+                act_str = "C"
+            elif action_raw in ("", "none"):
+                act_str = "-"
+            else:
+                act_str = action_raw[:1].upper()
+
+            try:
+                conf_val = float(dec.get("confidence", 0.0) or 0.0)
+            except Exception:
+                conf_val = 0.0
+
             line = (
                 "{:<10} {:<6} {:>9.4f} {:>10.4f} {:>10.4f} "
-                "{:>10.2f} {:>7.2f} {:>10.4f} {:>10.4f} {:>9}"
+                "{:>10.2f} {:>7.2f} {:>10.4f} {:>10.4f} {:>9} {:>5} {:>6.2f}"
             ).format(
                 symbol,
                 side,
@@ -657,6 +714,8 @@ class App(tk.Tk):
                 tp,
                 sl,
                 hold_str,
+                act_str,
+                conf_val,
             )
             lines.append(line)
 
