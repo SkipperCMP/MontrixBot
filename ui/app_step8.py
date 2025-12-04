@@ -495,6 +495,153 @@ class App(tk.Tk):
         except tk.TclError:
             # окно/виджет уже уничтожено — игнорируем обновление панели
             return
+            
+    def _update_active_from_core_state(self, se_snap: Optional[dict] = None) -> None:
+        """
+        Обновляет панель Active positions из снапшота StateEngine/UIAPI.
+
+        Работает и в SIM, и в REAL:
+        - если se_snap не передан, запрашивает snapshot через UIAPI.get_state_snapshot()
+        - берёт positions / ticks / signals_recent
+        - строит список позиций в формате, который понимает widgets.positions_panel.update_active_rows
+        """
+
+        # --- получаем снапшот ядра ---
+        try:
+            snapshot = se_snap
+            if snapshot is None:
+                api = self._ensure_uiapi()
+                if api is None or not hasattr(api, "get_state_snapshot"):
+                    return
+                snapshot = api.get_state_snapshot() or {}
+        except Exception:
+            return
+
+        snapshot = snapshot or {}
+
+        # --- исходные структуры из снапшота StateEngine ---
+        try:
+            positions = snapshot.get("positions") or {}
+        except Exception:
+            positions = {}
+
+        try:
+            ticks = snapshot.get("ticks") or {}
+        except Exception:
+            ticks = {}
+
+        try:
+            signals_recent = snapshot.get("signals_recent") or []
+        except Exception:
+            signals_recent = []
+
+        # --- собираем список позиций в универсальный формат ---
+        active: list[dict[str, Any]] = []
+
+        try:
+            for sym, pos in (positions or {}).items():
+                try:
+                    sym_u = str(sym or "").upper()
+                    if not sym_u:
+                        continue
+
+                    side = str(pos.get("side", "") or "")
+                    qty = float(pos.get("qty", 0.0) or 0.0)
+
+                    entry = float(pos.get("entry", 0.0) or 0.0)
+
+                    tick = ticks.get(sym_u, {}) or {}
+                    last_raw = tick.get("last", entry)
+                    try:
+                        last = float(last_raw)
+                    except Exception:
+                        last = entry
+
+                    # считаем PnL% по side
+                    pnl_pct = 0.0
+                    if entry > 0.0 and last > 0.0:
+                        side_u = side.upper()
+                        if side_u.startswith("LONG") or side_u == "BUY":
+                            pnl_pct = (last - entry) / entry * 100.0
+                        elif side_u.startswith("SHORT") or side_u == "SELL":
+                            pnl_pct = (entry - last) / entry * 100.0
+
+                    active.append(
+                        {
+                            "symbol": sym_u,
+                            "side": side,
+                            "qty": qty,
+                            "entry_price": entry,
+                            "current_price": last,
+                            "unrealized_pnl_pct": pnl_pct,
+                            "tp": float(pos.get("tp", 0.0) or 0.0),
+                            "sl": float(pos.get("sl", 0.0) or 0.0),
+                            # hold_days из ядра пока не считаем, оставляем 0.0
+                            "hold_days": float(pos.get("hold_days", 0.0) or 0.0),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            active = []
+
+        # --- строим last_decisions по signals_recent (ReplaceLogic) ---
+        last_decisions: dict[str, dict[str, Any]] = {}
+        try:
+            if isinstance(signals_recent, list):
+                for row in signals_recent:
+                    try:
+                        sym = str(row.get("symbol", "") or "").upper()
+                        if not sym:
+                            continue
+
+                        action = str(row.get("action", "") or "").lower()
+                        conf = row.get(
+                            "decision_confidence", row.get("signal_strength", 0.0)
+                        )
+                        try:
+                            conf_f = float(conf)
+                        except Exception:
+                            conf_f = 0.0
+
+                        last_decisions[sym] = {
+                            "action": action,
+                            "confidence": conf_f,
+                        }
+                    except Exception:
+                        continue
+        except Exception:
+            last_decisions = {}
+
+        # --- если позиций нет вообще ---
+        if not active:
+            try:
+                self._set_active_text("— no active positions —")
+            except Exception:
+                pass
+            return
+
+        # --- выводим строки через widgets.positions_panel ---
+        try:
+            from .widgets.positions_panel import update_active_rows  # type: ignore
+        except Exception:
+            try:
+                from ui.widgets.positions_panel import update_active_rows  # type: ignore
+            except Exception:
+                # если совсем ничего не импортировалось — просто плейсхолдер
+                try:
+                    self._set_active_text("— no active positions —")
+                except Exception:
+                    pass
+                return
+
+        try:
+            update_active_rows(self, active, last_decisions)
+        except Exception:
+            try:
+                self._set_active_text("— no active positions —")
+            except Exception:
+                pass
 
     def _update_active_from_sim(self, snapshot: dict) -> None:
         """Update Active position panel.
@@ -611,129 +758,176 @@ class App(tk.Tk):
         except Exception:
             last_decisions = {}
 
+        # --- если вообще нет позиций ---
         if not active:
             self._set_active_text("— no active positions —")
             return
 
-        def _format_hold(hold_days: float) -> str:
-            """
-            Форматирование времени удержания в виде:
-                - HH:MM      (если меньше суток)
-                - 1d HH:MM   (если есть целые дни)
-
-            hold_days — число дней (может быть дробным).
-            """
+        # делегируем форматирование и вывод панельке из widgets/positions_panel
+        try:
+            from .widgets.positions_panel import update_active_rows  # type: ignore
+        except Exception:
+            # fallback для вызова как "python ui/app_step8.py"
             try:
-                total_minutes = int(float(hold_days) * 24 * 60)
+                from ui.widgets.positions_panel import update_active_rows  # type: ignore
             except Exception:
-                return "--:--"
+                # если вообще не удалось импортировать — просто пишем текст без подсветки
+                self._set_active_text("— no active positions —")
+                return
 
-            if total_minutes < 0:
-                total_minutes = 0
+        try:
+            update_active_rows(self, active, last_decisions)
+        except Exception:
+            # на всякий случай, чтобы не уронить весь UI
+            self._set_active_text("— no active positions —")
 
-            days = total_minutes // (24 * 60)
-            rem = total_minutes % (24 * 60)
-            hours = rem // 60
-            minutes = rem % 60
+    def _update_active_from_core_state(self, se_snap: Optional[dict] = None) -> None:
+        """
+        Обновляет панель Active positions из снапшота StateEngine/UIAPI.
 
-            if days <= 0:
-                # только часы:минуты
-                return f"{hours:02d}:{minutes:02d}"
-            # дни + часы:минуты
-            return f"{days}d {hours:02d}:{minutes:02d}"
+        Работает и в SIM, и в REAL:
+        - если se_snap не передан, запрашивает snapshot через UIAPI.get_state_snapshot()
+        - берёт positions / ticks / signals_recent
+        - строит список позиций в формате, который понимает widgets.positions_panel.update_active_rows
+        """
+        # --- получаем снапшот ядра ---
+        try:
+            if se_snap is not None and isinstance(se_snap, dict):
+                snapshot = se_snap
+            else:
+                api = self._ensure_uiapi()
+                if api is None or not hasattr(api, "get_state_snapshot"):
+                    return
+                snap = api.get_state_snapshot()
+                if not isinstance(snap, dict):
+                    return
+                snapshot = snap
+        except Exception:
+            return
 
-        lines: list[str] = []
-        header = "{:<10} {:<6} {:>9} {:>10} {:>10} {:>10} {:>7} {:>10} {:>10} {:>9} {:>5} {:>6}".format(
-            "Symbol",
-            "Side",
-            "Qty",
-            "Entry",
-            "Last",
-            "Value",
-            "Pnl%",
-            "TP",
-            "SL",
-            "Hold",
-            "Act",
-            "Conf",
-        )
-        lines.append(header)
-        lines.append("-" * len(header))
+        snapshot = snapshot or {}
 
-        for pos in active:
-            symbol = str(pos.get("symbol", ""))
-            side = str(pos.get("side", ""))[:6]
-            qty = float(pos.get("qty", 0.0) or 0.0)
-            entry = float(pos.get("entry_price", 0.0) or 0.0)
-            last = float(pos.get("current_price", 0.0) or 0.0)
+        # --- исходные структуры из снапшота StateEngine ---
+        try:
+            positions = snapshot.get("positions") or {}
+        except Exception:
+            positions = {}
 
-            # базовый PnL% из снапшота (если есть)
-            try:
-                pnl_pct = float(pos.get("unrealized_pnl_pct", 0.0) or 0.0)
-            except Exception:
-                pnl_pct = 0.0
+        try:
+            ticks = snapshot.get("ticks") or {}
+        except Exception:
+            ticks = {}
 
-            # если движок не посчитал PnL%, считаем сами
-            if entry > 0.0 and last > 0.0:
+        try:
+            signals_recent = snapshot.get("signals_recent") or []
+        except Exception:
+            signals_recent = []
+
+        # --- собираем список позиций в универсальный формат ---
+        active: list[dict[str, Any]] = []
+        try:
+            for sym, pos in (positions or {}).items():
                 try:
-                    if abs(pnl_pct) < 0.0001:
+                    sym_u = str(sym or "").upper()
+                    if not sym_u:
+                        continue
+
+                    side = str(pos.get("side", "") or "")
+                    qty = float(pos.get("qty", 0.0) or 0.0)
+                    entry = float(pos.get("entry", 0.0) or 0.0)
+
+                    tick = ticks.get(sym_u, {}) or {}
+                    last_raw = tick.get("last", entry)
+                    try:
+                        last = float(last_raw)
+                    except Exception:
+                        last = entry
+
+                    # считаем PnL% по side
+                    pnl_pct = 0.0
+                    if entry > 0.0 and last > 0.0:
                         side_u = side.upper()
                         if side_u.startswith("LONG") or side_u == "BUY":
                             pnl_pct = (last - entry) / entry * 100.0
                         elif side_u.startswith("SHORT") or side_u == "SELL":
                             pnl_pct = (entry - last) / entry * 100.0
+
+                    active.append(
+                        {
+                            "symbol": sym_u,
+                            "side": side,
+                            "qty": qty,
+                            "entry_price": entry,
+                            "current_price": last,
+                            "unrealized_pnl_pct": pnl_pct,
+                            "tp": float(pos.get("tp", 0.0) or 0.0),
+                            "sl": float(pos.get("sl", 0.0) or 0.0),
+                            # если ядро уже считает hold_days — берём, иначе 0.0
+                            "hold_days": float(pos.get("hold_days", 0.0) or 0.0),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            active = []
+
+        # --- последние решения ReplaceLogic по символам (из signals_recent) ---
+        last_decisions: dict[str, dict[str, Any]] = {}
+        try:
+            if isinstance(signals_recent, list):
+                for row in signals_recent:
+                    try:
+                        sym = str(row.get("symbol", "") or "").upper()
+                        if not sym:
+                            continue
+
+                        action = str(row.get("action", "") or "").lower()
+                        # если нет decision_confidence, используем силу сигнала
+                        conf = row.get(
+                            "decision_confidence", row.get("signal_strength", 0.0)
+                        )
+                        try:
+                            conf_f = float(conf)
+                        except Exception:
+                            conf_f = 0.0
+
+                        last_decisions[sym] = {
+                            "action": action,
+                            "confidence": conf_f,
+                        }
+                    except Exception:
+                        continue
+        except Exception:
+            last_decisions = {}
+
+        # --- если позиций нет вообще ---
+        if not active:
+            try:
+                self._set_active_text("— no active positions —")
+            except Exception:
+                pass
+            return
+
+        # --- выводим строки через widgets.positions_panel ---
+        try:
+            from .widgets.positions_panel import update_active_rows  # type: ignore
+        except Exception:
+            try:
+                from ui.widgets.positions_panel import update_active_rows  # type: ignore
+            except Exception:
+                try:
+                    self._set_active_text("— no active positions —")
                 except Exception:
                     pass
+                return
 
-            # стоимость позиции
+        try:
+            update_active_rows(self, active, last_decisions)
+        except Exception:
             try:
-                value = qty * last
+                self._set_active_text("— no active positions —")
             except Exception:
-                value = 0.0
-
-            tp = float(pos.get("tp", 0.0) or 0.0)
-            sl = float(pos.get("sl", 0.0) or 0.0)
-            hold_days = float(pos.get("hold_days", 0.0) or 0.0)
-            hold_str = _format_hold(hold_days)
-
-            # --- последние решения ReplaceLogic по этому символу ---
-            sym_u = symbol.upper()
-            dec = last_decisions.get(sym_u) or {}
-            action_raw = str(dec.get("action", "") or "")
-            if action_raw == "buy":
-                act_str = "B"
-            elif action_raw == "close":
-                act_str = "C"
-            elif action_raw in ("", "none"):
-                act_str = "-"
-            else:
-                act_str = action_raw[:1].upper()
-
-            try:
-                conf_val = float(dec.get("confidence", 0.0) or 0.0)
-            except Exception:
-                conf_val = 0.0
-
-            line = (
-                "{:<10} {:<6} {:>9.4f} {:>10.4f} {:>10.4f} "
-                "{:>10.2f} {:>7.2f} {:>10.4f} {:>10.4f} {:>9} {:>5} {:>6.2f}"
-            ).format(
-                symbol,
-                side,
-                qty,
-                entry,
-                last,
-                value,
-                pnl_pct,
-                tp,
-                sl,
-                hold_str,
-                act_str,
-                conf_val,
-            )
-            lines.append(line)
-
-        self._set_active_text("\n".join(lines))
+                pass
 
     def _update_equity_bar(self, snapshot: dict) -> None:
         """Обновляет мини-панель Equity на верхней панели.
@@ -1342,11 +1536,13 @@ class App(tk.Tk):
                 return
 
             snapshot = api.get_state_snapshot()
+
             if not isinstance(snapshot, dict):
                 return
         except Exception:
             return
-
+            print("[DEBUG snapshot core]:", snapshot)
+            
         # 1) equity обновляем только если в snapshot['portfolio'] есть корректное значение
         try:
             portfolio = snapshot.get("portfolio") or {}
@@ -1365,8 +1561,14 @@ class App(tk.Tk):
             self._update_status_bar(snapshot)
         except Exception:
             pass
-            
-        # 3) журнал сделок (если зарегистрирован)
+
+        # 3) панель Active positions из снапшота ядра (SIM/REAL)
+        try:
+            self._update_active_from_core_state(snapshot)
+        except Exception:
+            pass
+
+        # 4) журнал сделок (если зарегистрирован)
         try:
             dj = getattr(self, "_deals_journal_widget", None)
             if dj is not None and hasattr(dj, "update_from_snapshot"):
