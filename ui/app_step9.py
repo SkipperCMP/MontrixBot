@@ -1932,36 +1932,80 @@ class App(tk.Tk):
         win = tk.Toplevel(self)
         win.title("MontrixBot — Signals history")
         win.geometry("900x400")
+        try:
+            win.configure(bg="#0f1216")  # фон окна под тёмную тему
+        except Exception:
+            pass
 
         cols = ("ts", "symbol", "side", "rsi", "macd", "macd_sig", "reason")
-        tree = ttk.Treeview(win, columns=cols, show="headings")
-        tree.pack(fill="both", expand=True)
-
-        vsb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-
         headers = {
             "ts": "Time",
             "symbol": "Symbol",
             "side": "Side",
             "rsi": "RSI",
             "macd": "MACD",
-            "macd_sig": "MACD_sig",
+            "macd_sig": "MACD sig",
             "reason": "Reason",
         }
+
         widths = {
-            "ts": 140,
-            "symbol": 80,
-            "side": 60,
+            "ts": 150,
+            "symbol": 90,
+            "side": 70,
             "rsi": 60,
             "macd": 80,
             "macd_sig": 80,
-            "reason": 400,
+            "reason": 380,
         }
+
+        # локальный стиль для журнала сигналов
+        style = ttk.Style(win)
+        try:
+            style.configure(
+                "Signals.Treeview",
+                background="#171B21",
+                fieldbackground="#171B21",
+                foreground="#E6EAF2",
+                rowheight=20,
+                font=("Segoe UI", 9),
+            )
+            style.configure(
+                "Signals.Treeview.Heading",
+                background="#111827",
+                foreground="#E6EAF2",
+                font=("Segoe UI", 9, "bold"),
+            )
+        except Exception:
+            # если что-то пошло не так — просто падаем обратно на дефолтный стиль
+            pass
+
+        tree = ttk.Treeview(
+            win,
+            columns=cols,
+            show="headings",
+            style="Signals.Treeview",
+        )
+        tree.pack(fill="both", expand=True, side="left")
+
+        vsb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+
+        numeric_right = {"rsi", "macd", "macd_sig"}
+        center_cols = {"symbol", "side"}
+
         for cid in cols:
-            tree.heading(cid, text=headers.get(cid, cid))
-            tree.column(cid, width=widths.get(cid, 80), anchor="w")
+            heading_text = headers.get(cid, cid.upper())
+            tree.heading(cid, text=heading_text)
+
+            if cid in numeric_right:
+                anchor = "e"        # числа вправо
+            elif cid in center_cols:
+                anchor = "center"   # символ / side по центру
+            else:
+                anchor = "w"        # время и reason влево
+
+            tree.column(cid, width=widths.get(cid, 80), anchor=anchor, stretch=True)
 
         def _fmt_float(val, pattern="{:.4f}"):
             try:

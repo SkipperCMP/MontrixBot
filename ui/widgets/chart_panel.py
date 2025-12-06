@@ -92,6 +92,25 @@ class ChartPanel(ttk.Frame):
         self.ax_rsi = self.figure.add_subplot(3, 1, 2, sharex=self.ax_price)
         self.ax_macd = self.figure.add_subplot(3, 1, 3, sharex=self.ax_price)
 
+        # тёмная тема для matplotlib под UI MontrixBot
+        dark_bg = "#0f1216"
+        card_bg = "#171B21"
+        fg = "#E6EAF2"
+        grid = "#2F3B52"
+
+        try:
+            self.figure.patch.set_facecolor(dark_bg)
+            for ax in (self.ax_price, self.ax_rsi, self.ax_macd):
+                ax.set_facecolor(card_bg)
+                ax.tick_params(colors=fg, labelsize=8)
+                ax.yaxis.label.set_color(fg)
+                for spine in ax.spines.values():
+                    spine.set_color(grid)
+            self.ax_macd.xaxis.label.set_color(fg)
+        except Exception:
+            # если matplotlib что-то не поддерживает — просто игнорируем
+            pass
+
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
@@ -114,29 +133,34 @@ class ChartPanel(ttk.Frame):
 
         # --- price
         self.ax_price.cla()
-        self.ax_price.plot(xs, ys)
+        self.ax_price.plot(xs, ys, linewidth=1.4)
         self.ax_price.set_ylabel("Price")
 
         # --- RSI
         self.ax_rsi.cla()
         rsi_vals = _rsi(ys, period=14)
-        self.ax_rsi.plot(xs, rsi_vals)
-        self.ax_rsi.axhline(30, linestyle="--")
-        self.ax_rsi.axhline(70, linestyle="--")
-        self.ax_rsi.set_ylabel("RSI")
-        self.ax_rsi.tick_params(labelbottom=False)
-
+        if rsi_vals:
+            self.ax_rsi.plot(xs[: len(rsi_vals)], rsi_vals, linewidth=1.0)
+        ...
         # --- MACD
         self.ax_macd.cla()
         macd_line, signal_line, hist = _macd(ys)
         if macd_line:
-            self.ax_macd.plot(xs[: len(macd_line)], macd_line, label="MACD")
+            self.ax_macd.plot(
+                xs[: len(macd_line)],
+                macd_line,
+                label="MACD",
+                linewidth=1.0,
+            )
         if signal_line:
-            self.ax_macd.plot(xs[: len(signal_line)], signal_line, label="Signal")
+            self.ax_macd.plot(
+                xs[: len(signal_line)],
+                signal_line,
+                label="Signal",
+                linewidth=1.0,
+            )
         if hist:
             self.ax_macd.bar(xs[: len(hist)], hist, alpha=0.3)
-        self.ax_macd.set_ylabel("MACD")
-        self.ax_macd.set_xlabel("Index")
 
         # --- title & layout
         try:
