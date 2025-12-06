@@ -436,7 +436,7 @@ class App(tk.Tk):
         - side_long / side_short: колонка Side (LONG / SHORT)
 
         Формат строк задаётся _update_active_from_sim:
-            header -> "Symbol Side Qty Entry Last Value Pnl% TP SL Hold"
+            header -> "Symbol Side Qty Entry Last Value Pnl% TP SL Hold Trend"
             далее строки с теми же колонками.
         """
         box = getattr(self, "active_box", None)
@@ -546,6 +546,28 @@ class App(tk.Tk):
                     )
                 except Exception:
                     pass
+                # --- маркер тренда в последней колонке ---
+                try:
+                    trend_token = parts[-1]
+                    col_start = line.rfind(trend_token)
+                    if col_start >= 0:
+                        col_end = col_start + len(trend_token)
+                        if pnl_val > 0.0:
+                            ttag = "trend_up"
+                        elif pnl_val < 0.0:
+                            ttag = "trend_down"
+                        else:
+                            ttag = "trend_flat"
+                        try:
+                            box.tag_add(
+                                ttag,
+                                f"{row_idx}.{col_start}",
+                                f"{row_idx}.{col_end}",
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
             box.configure(state="disabled")
         except tk.TclError:
@@ -648,7 +670,7 @@ class App(tk.Tk):
             return f"{days}d {hours:02d}:{minutes:02d}"
 
         lines: list[str] = []
-        header = "{:<10} {:<6} {:>9} {:>10} {:>10} {:>10} {:>7} {:>10} {:>10} {:>9}".format(
+        header = "{:<10} {:<6} {:>9} {:>10} {:>10} {:>10} {:>7} {:>10} {:>10} {:>9} {:>5}".format(
             "Symbol",
             "Side",
             "Qty",
@@ -659,6 +681,7 @@ class App(tk.Tk):
             "TP",
             "SL",
             "Hold",
+            "Trend",
         )
         lines.append(header)
         lines.append("-" * len(header))
@@ -698,10 +721,17 @@ class App(tk.Tk):
             sl = float(pos.get("sl", 0.0) or 0.0)
             hold_days = float(pos.get("hold_days", 0.0) or 0.0)
             hold_str = _format_hold(hold_days)
-
+            
+            # маркер тренда по знаку PnL% (используем пули, цвет задаётся тегами)
+            if pnl_pct > 0.1:
+                trend_mark = "●"
+            elif pnl_pct < -0.1:
+                trend_mark = "●"
+            else:
+                trend_mark = "·"
             line = (
-                "{:<10} {:<6} {:>9.4f} {:>10.4f} {:>10.4f} "
-                "{:>10.2f} {:>7.2f} {:>10.4f} {:>10.4f} {:>9}"
+                "{:<10} {:<6} {:>9.4f} {:>10.4f} {:>10.4f} {:>10.2f} "
+                "{:>7.2f} {:>10.4f} {:>10.4f} {:>9} {:>5}"
             ).format(
                 symbol,
                 side,
@@ -713,6 +743,7 @@ class App(tk.Tk):
                 tp,
                 sl,
                 hold_str,
+                trend_mark,
             )
             lines.append(line)
 

@@ -56,6 +56,14 @@ def build_activepos_ui(app: Any) -> None:
     except Exception:
         pass
 
+    # маркеры тренда в последней колонке (пули)
+    try:
+        app.active_box.tag_configure("trend_up", foreground="#7ddc84")     # зелёный dot
+        app.active_box.tag_configure("trend_down", foreground="#ff7a7a")   # красный dot
+        app.active_box.tag_configure("trend_flat", foreground="#9aa3ad")   # серый dot
+    except Exception:
+        pass
+
     app.active_box.pack(fill="x", pady=(2, 0))
     app._set_active_text("— no active positions —")
 
