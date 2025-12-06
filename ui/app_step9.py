@@ -18,6 +18,24 @@ from typing import List, Tuple, Optional
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
+
+# --- ensure project root is on sys.path ---
+try:
+    ROOT = Path(__file__).resolve().parent.parent
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+except Exception:
+    pass
+
+# Dark-тема вынесена в отдельный модуль (Step 1.2.8)
+try:
+    from .theme_dark import apply_neutral_dark
+except Exception:
+    try:
+        from ui.theme_dark import apply_neutral_dark
+    except Exception:
+        apply_neutral_dark = None  # type: ignore[assignment]
+
 from tools.formatting import fmt_price, fmt_pnl
 
 # ---------------------------------------------------------------------------
@@ -180,7 +198,7 @@ AUTOSIM_FACTORY, _AUTOSIM_ERR = _try_import_autosim()
 #  Константы путей
 # ---------------------------------------------------------------------------
 
-APP_TITLE = "MontrixBot"
+APP_TITLE = "MontrixBot — UI Step9 (dark theme + widgets)"
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SAFE_FILE = ROOT_DIR / "SAFE_MODE"
 RUNTIME_DIR = ROOT_DIR / "runtime"
@@ -261,39 +279,77 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ UI --
     def _build_styles(self) -> None:
+        """
+        Step 1.2.8:
+        - вместо локальной простенькой темы используем ui.theme_dark.apply_neutral_dark
+        - оставляем fallback на старые стили, если модуль недоступен
+        """
         style = ttk.Style()
         try:
             style.theme_use("clam")
         except Exception:
             pass
 
-        style.configure("Dark.TFrame", background="#1c1f24")
-        style.configure("Dark.TLabel", background="#1c1f24", foreground="#e6e6e6")
-        style.configure("Muted.TLabel", background="#1c1f24", foreground="#9aa0a6")
-        style.configure(
-            "BadgeSafe.TLabel",
-            background="#26a269",
-            foreground="#0b0b0b",
-            padding=(8, 2),
-        )
-        style.configure(
-            "BadgeWarn.TLabel",
-            background="#d0b343",
-            foreground="#0b0b0b",
-            padding=(8, 2),
-        )
-        style.configure(
-            "BadgeDanger.TLabel",
-            background="#e01b24",
-            foreground="#0b0b0b",
-            padding=(8, 2),
-        )
+        # Пытаемся применить общую dark-тему
+        palette_bg = None
+        if apply_neutral_dark is not None:
+            try:
+                palette = apply_neutral_dark(style)
+                if isinstance(palette, dict):
+                    palette_bg = palette.get("bg")
+            except Exception:
+                palette_bg = None
+
+        # Fallback на старую схему, если тема не применилась
+        if palette_bg is None:
+            # старые значения из app_step8
+            bg = "#1c1f24"
+            fg = "#e6e6e6"
+            muted = "#9aa0a6"
+
+            style.configure("Dark.TFrame", background=bg)
+            style.configure("Dark.TLabel", background=bg, foreground=fg)
+            style.configure("Muted.TLabel", background=bg, foreground=muted)
+            style.configure(
+                "BadgeSafe.TLabel",
+                background="#26a269",
+                foreground="#0b0b0b",
+                padding=(8, 2),
+            )
+            style.configure(
+                "BadgeWarn.TLabel",
+                background="#d0b343",
+                foreground="#0b0b0b",
+                padding=(8, 2),
+            )
+            style.configure(
+                "BadgeDanger.TLabel",
+                background="#e01b24",
+                foreground="#0b0b0b",
+                padding=(8, 2),
+            )
+        else:
+            # если тема отдала палитру — подстраиваем фон окна под неё
+            try:
+                self.configure(bg=palette_bg)
+            except Exception:
+                pass
+
+        # Общие стили кнопок / полей
         style.configure("Dark.TButton", padding=6)
         style.map("Dark.TButton", background=[("active", "#2a2f36")])
 
         style.configure("Log.TFrame", background="#121417")
-        style.configure("EntryDark.TEntry", fieldbackground="#121417", foreground="#e6e6e6")
-        style.configure("ComboDark.TCombobox", fieldbackground="#121417", foreground="#e6e6e6")
+        style.configure(
+            "EntryDark.TEntry",
+            fieldbackground="#121417",
+            foreground="#e6e6e6",
+        )
+        style.configure(
+            "ComboDark.TCombobox",
+            fieldbackground="#121417",
+            foreground="#e6e6e6",
+        )
 
     def _build_topbar(self) -> None:
         """Построение верхней панели вынесено в ui.widgets.controls_bar."""

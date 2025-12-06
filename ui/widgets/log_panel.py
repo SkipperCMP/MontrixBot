@@ -71,7 +71,22 @@ def build_log_ui(app: Any, StatusBar: Any) -> None:
 
     app.log = log
 
-    # ------------------------------------------------------------------ bottom: Status bar
+    # ------------------------------------------------------------------ bottom: MiniEquity + Status bar
+    # Мини-панель портфеля (может не создаться, тогда просто None)
+    app.mini_equity = None
+    try:
+        from .mini_equity_bar import MiniEquityBar  # type: ignore
+        try:
+            me = MiniEquityBar(frm)
+            # mini-equity располагаем над статус-баром, но у нижней кромки
+            me.frame.pack(fill="x", side="bottom")
+            app.mini_equity = me
+        except Exception:
+            app.mini_equity = None
+    except Exception:
+        app.mini_equity = None
+
+    # Сам статус-бар — самый нижний элемент
     app.status_bar = None
     if StatusBar is not None:
         try:
