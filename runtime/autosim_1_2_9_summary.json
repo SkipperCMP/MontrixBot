@@ -1,0 +1,12 @@
+{
+  "symbol": "ADAUSDT",
+  "ticks_requested": 5000,
+  "ticks_ok": 5000,
+  "errors": 0,
+  "duration_sec": 29.956499814987183,
+  "ticks_per_sec": 166.90868528967823,
+  "last_price": 109.04919668465249,
+  "ts_start": 1765020902.081545,
+  "ts_end": 1765020932.038045,
+  "version": "1.2-pre2_STEP1.2.9"
+}
