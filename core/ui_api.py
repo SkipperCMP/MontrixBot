@@ -201,11 +201,19 @@ class UIAPI:
             advisor { side, strength, trend, reason, ... }
             trend
 
-        Дополнительно для STEP1.8:
-            portfolio { equity, pnl_day_pct, pnl_total_pct, open_positions_count }
+        Дополнительно для STEP1.8+:
+            portfolio {
+                equity,
+                pnl_day_pct,
+                pnl_total_pct,
+                open_positions_count,
+                open_pnl_abs,   # суммарный незакрытый PnL по всем позициям ($) или None
+                open_pnl_pct,   # тот же PnL в %% от вложенного капитала или None
+            }
             health { status, messages, last_tick_at, latency_ms }
             ts (unix timestamp)
             signals_recent / trades_recent
+
         """
         # --- 1) Снапшот StateEngine ---
         core_snap: Dict[str, Any] = {}
@@ -298,7 +306,54 @@ class UIAPI:
             "pnl_day_pct": pnl_day_pct,
             "pnl_total_pct": pnl_total_pct,
             "open_positions_count": open_positions_count,
+            "open_pnl_abs": open_pnl_abs,
+            "open_pnl_pct": open_pnl_pct,
         }
+
+        # --- 4.1) Open PnL по открытым позициям (best-effort) ---
+        open_pnl_abs: Optional[float] = None
+        open_pnl_pct: Optional[float] = None
+
+        try:
+            total_pnl = 0.0
+            total_notional = 0.0
+
+            # positions: { "SYMBOL": { side, qty, entry, ... }, ... }
+            for sym, pos in positions.items():
+                try:
+                    qty = float(pos.get("qty") or 0.0)
+                    entry_price = float(pos.get("entry") or 0.0)
+                except Exception:
+                    continue
+
+                if qty == 0.0 or entry_price == 0.0:
+                    continue
+
+                sym_key = str(sym).upper()
+                tinfo = ticks.get(sym_key) or {}
+                last_raw = tinfo.get("last")
+                if last_raw is None:
+                    continue
+
+                try:
+                    last_price = float(last_raw)
+                except Exception:
+                    continue
+
+                # qty уже со знаком: для SHORT отрицательный, формула (last - entry) * qty даёт правильный знак
+                pnl = (last_price - entry_price) * qty
+                total_pnl += pnl
+                total_notional += abs(entry_price * qty)
+
+            if total_notional > 0.0:
+                open_pnl_abs = total_pnl
+                open_pnl_pct = (total_pnl / total_notional) * 100.0
+            else:
+                open_pnl_abs = None
+                open_pnl_pct = None
+        except Exception:
+            open_pnl_abs = None
+            open_pnl_pct = None
 
         # --- 5) Health-блок ---
         health: Dict[str, Any] = {

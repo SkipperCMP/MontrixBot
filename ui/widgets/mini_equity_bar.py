@@ -75,13 +75,15 @@ class MiniEquityBar:
 
     def update(self, portfolio: Mapping[str, Any] | None) -> None:
         """
-        Ожидается формат (из UIAPI.snapshot_for_ui):
+        Ожидается формат (из UIAPI._build_state_payload):
 
             {
                 "equity": float | None,
                 "pnl_day_pct": float | None,
                 "pnl_total_pct": float | None,
                 "open_positions_count": int | None,
+                "open_pnl_abs": float | None,   # суммарный незакрытый PnL ($)
+                "open_pnl_pct": float | None,   # необязательный %
             }
         """
         if portfolio is None:
@@ -90,9 +92,10 @@ class MiniEquityBar:
         self._last_portfolio = dict(portfolio)
 
         eq = portfolio.get("equity")
-        day = portfolio.get("pnl_day_pct")
-        total = portfolio.get("pnl_total_pct")
+        pnl_day = portfolio.get("pnl_day_pct")
+        pnl_total = portfolio.get("pnl_total_pct")
         open_cnt = portfolio.get("open_positions_count")
+        open_pnl_abs = portfolio.get("open_pnl_abs")
 
         # --- Equity ---
         try:
@@ -147,12 +150,29 @@ class MiniEquityBar:
             except tk.TclError:
                 pass
 
-        # --- Open positions ---
+        # --- Open positions + open PnL ---
         try:
             cnt = int(open_cnt) if open_cnt is not None else 0
         except Exception:
             cnt = 0
+
         try:
-            self._lbl_open.configure(text=f"Open: {cnt}")
+            if open_pnl_abs is None:
+                txt_open = f"Open: {cnt}"
+                fg_open = "#e6e6e6"
+            else:
+                txt_open = f"Open: {cnt} ({fmt_pnl(open_pnl_abs)}$)"
+                if open_pnl_abs > 0:
+                    fg_open = "#7ddc7d"
+                elif open_pnl_abs < 0:
+                    fg_open = "#ff8080"
+                else:
+                    fg_open = "#e6e6e6"
+
+            self._lbl_open.configure(text=txt_open, foreground=fg_open)
         except tk.TclError:
-            pass
+            # на всякий случай откатываемся к простому варианту
+            try:
+                self._lbl_open.configure(text=f"Open: {cnt}", foreground="#e6e6e6")
+            except tk.TclError:
+                pass
