@@ -1,6 +1,12 @@
 {
+  "safe_mode": true,
+  "panic": {
+    "active": false,
+    "reason": "",
+    "since": null
+  },
   "tpsl_autoloop": {
-    "enabled": false,
+    "enabled": true,
     "interval_sec": 5,
     "mode": "dynamic",
     "min_move_pct": 0.35,
@@ -13,10 +19,7 @@
       "vol_window": 50
     }
   },
-  "safe_mode": true,
-  "panic": {
-    "active": true,
-    "reason": "UI_PANIC_ADAUSDT",
-    "since": 1765103809.974264
+  "advisor": {
+    "enabled": false
   }
 }

@@ -38,6 +38,9 @@ except Exception:
 
 from tools.formatting import fmt_price, fmt_pnl
 
+from runtime.sim_state_tools import load_sim_state, save_sim_state
+from runtime.panic_tools import is_panic_active
+
 # ---------------------------------------------------------------------------
 #  Универсальные импорты ChartPanel / indicators / signals
 # ---------------------------------------------------------------------------
@@ -406,20 +409,28 @@ class App(tk.Tk):
     # ------------------------------------------------------------- helpers --
     def _load_sim_state_from_file(self) -> None:
         """Пробуем подхватить последний снимок SIM из sim_state.json при старте."""
+        # При активном PANIC авто-восстановление запрещено
         try:
-            sim_state_path = RUNTIME_DIR / "sim_state.json"
-            if not sim_state_path.exists():
+            if is_panic_active():
+                try:
+                    self._log("[SIM] panic mode active, skip sim_state auto-recovery")
+                except Exception:
+                    pass
                 return
-            txt = sim_state_path.read_text(encoding="utf-8")
-            if not txt.strip():
-                return
-            snapshot = json.loads(txt)
-        except Exception as e:
-            # Логируем, но не роняем UI
+        except Exception:
+            # Если даже проверка PANIC рухнула — просто не восстанавливаем
+            return
+
+        try:
+            snapshot = load_sim_state()
+        except Exception as e:  # noqa: BLE001
             try:
                 self._log(f"[SIM] failed to load sim_state.json: {e}")
             except Exception:
                 pass
+            return
+
+        if not snapshot:
             return
 
         try:
@@ -1793,13 +1804,9 @@ class App(tk.Tk):
                 except Exception as e:
                     self._log(f"[AUTOSIM] write trades error: {e}")
 
-                # persist snapshot for debug / future UI
+                # persist snapshot for debug / future UI (атомарно)
                 try:
-                    sim_state_path = RUNTIME_DIR / "sim_state.json"
-                    sim_state_path.write_text(
-                        json.dumps(snapshot, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
+                    save_sim_state(snapshot)
                 except Exception:
                     pass
 
@@ -2817,13 +2824,9 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-            # перезаписываем sim_state.json для консистентности
+            # перезаписываем sim_state.json для консистентности (атомарно)
             try:
-                sim_state_path = RUNTIME_DIR / "sim_state.json"
-                sim_state_path.write_text(
-                    json.dumps(snapshot, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                save_sim_state(snapshot)
             except Exception:
                 pass
 

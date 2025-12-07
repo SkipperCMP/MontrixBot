@@ -18,5 +18,8 @@
     "active": false,
     "reason": "",
     "since": null
+  },
+  "advisor": {
+    "enabled": false
   }
 }
