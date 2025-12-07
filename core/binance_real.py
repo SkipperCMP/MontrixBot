@@ -21,7 +21,7 @@ class BinanceREST:
         return hmac.new(self.api_secret, qs.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def _headers(self) -> Dict[str,str]:
-        return {"X-MBX-APIKEY": self.api_key, "User-Agent": "MontrixBot/1.2-pre1"}
+        return {"X-MBX-APIKEY": self.api_key, "User-Agent": "MontrixBot/1.2-pre2"}
 
     def _req(self, method: str, path: str, params: Dict[str, Any]|None=None, signed: bool=False, timeout=15) -> dict:
         url = self.base + path

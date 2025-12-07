@@ -1,4 +1,4 @@
-# core/executor.py — 1.2-pre1 STEP1.3b
+# core/executor.py — 1.2-pre2 STEP1.2.14
 # OrderExecutor + Preview + JSONL journal for trades (SIM)
 
 from __future__ import annotations

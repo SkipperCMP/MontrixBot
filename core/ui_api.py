@@ -162,7 +162,7 @@ class UIAPI:
         """Добавить запись в журнал сделок (для UI)."""
         self._append_bounded(self._recent_trades, row)
 
-    # Backward-compatible aliases for older UI code (app_step8 AUTOSIM bridge)
+    # Backward-compatible aliases for older UI code (historical app_step8 AUTOSIM bridge)
     def append_recent_signal(self, row: Dict[str, Any]) -> None:
         """Alias for add_recent_signal (compat with existing UI code)."""
         self.add_recent_signal(row)

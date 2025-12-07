@@ -7,5 +7,5 @@ if [ ! -f runtime/exchange_info.json ]; then
   echo "[INIT] Fetching exchangeInfo..."
   python3 tools/fetch_exchange_info.py
 fi
-echo "[RUN] UI (step8)"
+echo "[RUN] UI (step9)"
 python3 scripts/run_ui.py

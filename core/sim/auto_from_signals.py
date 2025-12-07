@@ -412,7 +412,7 @@ class AutoSimFromSignals:
     """
     Обёртка для использования из UI.
 
-    В app_step8.py вызывается так:
+        Исторически в app_step8.py вызывалось так (сейчас — через app_step9):
         AutoSimFromSignals(config=AutoSimConfig())
         ...
         snapshot = autosim.process(symbol, last_price, sig, reco)

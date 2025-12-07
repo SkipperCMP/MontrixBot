@@ -1,13 +1,14 @@
 # scripts/smoke_run.py
 """
 Final smoke for MontrixBot 1.2-pre1 — SMOKE TEST (legacy).
+
+Legacy сценарий, оставлен как есть для совместимости и регрессионных проверок.
+Текущий актуальный baseline: MontrixBot 1.2-pre2 (см. файл VERSION).
+
 Checks (no internet required):
-  1) SIM + TP/SL auto-close (synthetic feed)
-  2) SIM + Recovery restart (from trades.jsonl)
-  3) exchangeInfo preview/validate (needs runtime/exchange_info.json)
-  4) REAL (dry-run) market path (no real orders)
-Exit code: 0 on success, 1 on any failure.
+...
 """
+
 import os, sys, time, math
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 

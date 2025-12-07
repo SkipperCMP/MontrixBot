@@ -79,14 +79,14 @@ def _try_import_uiapi():
 
 def _try_import_statusbar():
     last_error = None
-    # 1) запуск как пакет: python -m ui.app_step8
+    # 1) запуск как пакет: python -m ui.app_step9
     try:
         from .widgets.status_bar import StatusBar as _SB  # type: ignore
         return _SB, None
     except Exception as e:  # noqa: BLE001
         last_error = e
 
-    # 2) запуск как скрипт: python ui/app_step8.py
+    # 2) запуск как скрипт: python ui/app_step9.py
     try:
         root = Path(__file__).resolve().parent.parent
         if str(root) not in sys.path:
@@ -302,7 +302,7 @@ class App(tk.Tk):
 
         # Fallback на старую схему, если тема не применилась
         if palette_bg is None:
-            # старые значения из app_step8
+            # старые значения из app_step9 (ранее app_step8)
             bg = "#1c1f24"
             fg = "#e6e6e6"
             muted = "#9aa0a6"
@@ -356,7 +356,7 @@ class App(tk.Tk):
         try:
             from .widgets.controls_bar import build_topbar_ui  # type: ignore
         except Exception:
-            # запуск как скрипт: python ui/app_step8.py
+            # запуск как скрипт: python ui/app_step9.py
             root = Path(__file__).resolve().parent.parent
             if str(root) not in sys.path:
                 sys.path.insert(0, str(root))

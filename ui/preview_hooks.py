@@ -11,7 +11,7 @@ def apply_preview_colors(lbl_price, lbl_qty, rounded_price, rounded_qty):
         pass
 
 
-def set_window_title(root, version: str = "MontrixBot 1.2-pre1 — Preview"):
+def set_window_title(root, version: str = "MontrixBot 1.2-pre2 — Preview"):
     """Set window title for preview builds; safe no-op on failure."""
     try:
         root.title(version)
