@@ -2926,24 +2926,36 @@ class App(tk.Tk):
             )
 
     def on_panic(self) -> None:
-        """Panic через UIAPI в SIM (закрытие позиций)."""
+        """Panic через UIAPI в SIM (закрытие позиций) + глобальный PANIC-KILL."""
         api = self._ensure_uiapi()
         if api is None:
             messagebox.showwarning("Panic", "UI bridge (UIAPI) недоступен")
             return
+
         sym = self.var_symbol.get().strip() or DEFAULT_SYMBOLS[0]
         if not messagebox.askyesno("Panic", f"Panic close for {sym}?"):
             return
+
         try:
-            # сначала закрываем AUTOSIM и фиксируем PnL
+            # 1) сначала закрываем AUTOSIM и фиксируем PnL
             try:
                 self._manual_close_sim_position(sym, reason="UI_PANIC")
             except Exception:
                 pass
 
-            # затем уже дергаем UIAPI.panic
+            # 2) затем уже дергаем UIAPI.panic для закрытия позиции через TPSL
             api.panic(sym)
             self._log(f"[UI] ui bridge PANIC {sym}")
+
+            # 3) и, наконец, включаем глобальный PANIC-KILL:
+            #    SAFE_MODE + отключение автолоопа + panic-флаг
+            try:
+                from runtime.panic_tools import activate_panic
+                activate_panic(f"UI_PANIC_{sym}")
+                self._log("[PANIC] panic_kill activated (SAFE_MODE + TPSL autoloop OFF)")
+            except Exception as e2:  # noqa: BLE001
+                self._log(f"[PANIC][WARN] panic_kill activation failed: {e2!r}")
+
         except Exception as e:  # noqa: BLE001
             self._log(f"[ERROR] ui bridge PANIC failed: {e!r}")
             messagebox.showerror("Panic", f"Panic failed: {e}")

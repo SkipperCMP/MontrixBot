@@ -27,3 +27,10 @@ runtime/exchange_info*.json
 # Бэкапы/архи
 *.zip
 *.bak
+
+# === EXPORTS (исключить все файлы экспорта) ===
+exports/
+exports/*
+exports/csv/
+exports/json/
+exports/xlsx/

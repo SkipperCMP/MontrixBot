@@ -13,5 +13,10 @@
       "vol_window": 50
     }
   },
-  "safe_mode": true
+  "safe_mode": true,
+  "panic": {
+    "active": false,
+    "reason": "",
+    "since": null
+  }
 }

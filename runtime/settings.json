@@ -1,6 +1,6 @@
 {
   "tpsl_autoloop": {
-    "enabled": true,
+    "enabled": false,
     "interval_sec": 5,
     "mode": "dynamic",
     "min_move_pct": 0.35,
@@ -13,5 +13,10 @@
       "vol_window": 50
     }
   },
-  "safe_mode": true
+  "safe_mode": true,
+  "panic": {
+    "active": true,
+    "reason": "UI_PANIC_ADAUSDT",
+    "since": 1765103809.974264
+  }
 }
