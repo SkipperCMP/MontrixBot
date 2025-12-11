@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-core/runtime_state.py — STEP 1.3.2 Runtime-Save (pre1)
+core/runtime_state.py — STEP 1.3.3 Runtime-Consistency (pre3)
 
 Единая точка доступа к runtime/state.json и runtime/sim_state.json
 для CORE и ui_api.
@@ -30,19 +30,48 @@ _state_manager = StateManager(STATE_PATH)
 
 def _ensure_base_structure(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Гарантирует минимально валидную структуру runtime-состояния.
+    Гарантирует минимально валидную и типобезопасную структуру runtime-состояния.
 
-    Если чего-то нет — аккуратно добавляем по умолчанию, но не ломаем
-    существующие поля.
+    - Всегда возвращает dict;
+    - Обязательно содержит ключи "positions", "meta", "sim";
+    - Значения по этим ключам всегда dict (при некорректных типах — мягкий reset).
     """
     if not isinstance(data, dict):
         logger.error("runtime_state: got non-dict state, resetting to empty dict")
         data = {}
 
-    # Минимальные обязательные секции
-    data.setdefault("positions", {})
-    data.setdefault("meta", {})
-    data.setdefault("sim", {})
+    # positions: гарантируем dict
+    positions = data.get("positions")
+    if positions is None:
+        data["positions"] = {}
+    elif not isinstance(positions, dict):
+        logger.warning(
+            "runtime_state: 'positions' is not a dict (%s), resetting to {}",
+            type(positions).__name__,
+        )
+        data["positions"] = {}
+
+    # meta: гарантируем dict
+    meta = data.get("meta")
+    if meta is None:
+        data["meta"] = {}
+    elif not isinstance(meta, dict):
+        logger.warning(
+            "runtime_state: 'meta' is not a dict (%s), resetting to {}",
+            type(meta).__name__,
+        )
+        data["meta"] = {}
+
+    # sim: гарантируем dict, но не создаём его из мусора
+    sim = data.get("sim")
+    if sim is None:
+        data["sim"] = {}
+    elif not isinstance(sim, dict):
+        logger.warning(
+            "runtime_state: 'sim' is not a dict (%s), resetting to {}",
+            type(sim).__name__,
+        )
+        data["sim"] = {}
 
     return data
 

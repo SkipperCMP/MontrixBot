@@ -1,7 +1,7 @@
 {
-  "ts": 1765453946,
+  "ts": 1765471722,
   "symbol": "ADAUSDT",
-  "last_price": 137.7894,
+  "last_price": 99.9656,
   "portfolio": {
     "equity": 1000.0,
     "cash": 1000.0,
@@ -14,6 +14,6 @@
   "trades": [],
   "meta": {
     "version": "sim_state_v1",
-    "saved_at": 1765453946.6216245
+    "saved_at": 1765471722.1303296
   }
 }

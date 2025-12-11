@@ -2,7 +2,7 @@
   "panic": {
     "active": true,
     "reason": "UI_PANIC_ADAUSDT",
-    "since": 1765108082.361297
+    "since": 1765471683.560195
   },
   "tpsl_autoloop": {
     "enabled": false
