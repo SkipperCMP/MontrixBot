@@ -70,3 +70,18 @@ def save_sim_state(snapshot: Dict[str, Any]) -> None:
                 os.remove(tmp_path)
         except Exception:
             pass
+
+def clear_sim_state() -> None:
+    """
+    Полный сброс файла runtime/sim_state.json (best-effort).
+
+    Используется, когда нужно принудительно забыть SIM-снимок,
+    например по запросу от UI ('Reset SIM').
+    """
+    try:
+        if os.path.exists(SIM_STATE_PATH):
+            os.remove(SIM_STATE_PATH)
+    except Exception:
+        # Любые ошибки при удалении файла игнорируем:
+        # сброс SIM не должен ломать основной процесс.
+        pass

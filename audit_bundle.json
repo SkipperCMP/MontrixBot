@@ -1,0 +1,42 @@
+{
+  "project": "MontrixBot",
+  "baseline": {
+    "name": "MontrixBot_STEP1.3.2_RuntimeSave_pre10_BASELINE",
+    "previous": "MontrixBot_STEP1.3.2_RuntimeSave_pre9_BASELINE",
+    "next": "MontrixBot_STEP1.3.3_RuntimePersistence_pre1_BASELINE",
+    "step": "1.3.2",
+    "tag": "RuntimeSave",
+    "pre": 10
+  },
+  "roadmap": {
+    "working": "1.3.x — Runtime Hooks / Runtime-Save / UI Runtime Cleanup",
+    "extended_ref": "MontrixBot Roadmap v2.0 Extended Edition"
+  },
+  "files": {
+    "changed": [
+      "core/executor.py",
+      "core/runtime_persistence.py",
+      "core/runtime_state.py",
+      "core/state_binder.py",
+      "core/state_engine.py",
+      "core/ui_api.py",
+      "runtime/sim_state.json",
+      "runtime/state.json",
+      "runtime/tpsl_loop.py",
+      "ui/app_step9.py",
+      "ui/controllers/chart_controller.py",
+      "ui/controllers/positions_controller.py",
+      "ui/services/snapshot_service.py",
+      "ui/services/tick_updater.py",
+      "ui/state/ui_state.py"
+    ]
+  },
+  "notes": [
+    "RuntimeState (core/runtime_state.py) остаётся единым persistent runtime store",
+    "Добавлен слой core/runtime_persistence.py для обновления runtime_state по UI-снапшоту",
+    "UIAPI получил метод maybe_persist_runtime_state() с time-based троттлингом",
+    "SnapshotService вызывает UIAPI.maybe_persist_runtime_state(snapshot) при каждом tick-снапшоте",
+    "sim-состояние хранится и обновляется отдельно (через существующую логику sim_state_tools/runtime_state)",
+    "UI по-прежнему не трогает runtime-файлы напрямую"
+  ]
+}

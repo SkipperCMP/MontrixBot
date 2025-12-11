@@ -1,19 +1,31 @@
 {
-  "ts": 1765109246,
+  "ts": 1765451299,
   "symbol": "ADAUSDT",
-  "last_price": 99.5061,
+  "last_price": 137.7894,
   "portfolio": {
     "equity": 1000.0,
-    "cash": 1000.0,
-    "open_positions_count": 0,
+    "cash": 333.33333333333223,
+    "open_positions_count": 1,
     "pnl_total_pct": 0.0,
     "pnl_day_pct": 0.0
   },
-  "active": [],
+  "active": [
+    {
+      "symbol": "ADAUSDT",
+      "side": "LONG",
+      "qty": 4.838301543273051,
+      "entry_price": 137.7894,
+      "current_price": 137.7894,
+      "unrealized_pnl_pct": 0.0,
+      "tp": 143.300976,
+      "sl": 133.655718,
+      "hold_days": 4.7885422353391294e-05
+    }
+  ],
   "closed_trades": [],
   "trades": [],
   "meta": {
     "version": "sim_state_v1",
-    "saved_at": 1765109246.285011
+    "saved_at": 1765451299.1054108
   }
 }

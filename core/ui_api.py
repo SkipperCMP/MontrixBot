@@ -10,6 +10,8 @@ from core.executor import OrderExecutor, Preview
 from core.tpsl import TPSLManager, TPSSLConfig
 from core.state_binder import StateBinder
 from core.events import StateSnapshot
+from core.runtime_state import load_runtime_state, reset_sim_state
+from core.tpsl_settings_api import get_tpsl_settings, update_tpsl_settings
 
 
 @dataclass
@@ -72,6 +74,9 @@ class UIAPI:
             # если биндер недоступен, UIAPI продолжит работать по старой схеме
             self._binder = None
 
+        # STEP1.3.3: троттлинг для runtime-персистентности
+        # (чтобы не писать state.json на каждый тик).
+        self._last_runtime_persist_ts: float = 0.0
 
     # ==============================
     #     УСТАНОВКА РЕЖИМА UI
@@ -402,9 +407,75 @@ class UIAPI:
         return snap
 
     # ==============================
+    #   RUNTIME SNAPSHOT ДЛЯ UI
+    # ==============================
+    def get_runtime_state_snapshot(self) -> Dict[str, Any]:
+        """
+        Объединённое runtime-состояние (state.json + sim_state.json) для UI.
+
+        UI ничего не знает про файлы: всё идёт через core/runtime_state.
+        """
+        try:
+            return load_runtime_state()
+        except Exception:
+            return {}
+
+    def maybe_persist_runtime_state(self, snapshot: Optional[Dict[str, Any]] = None) -> None:
+        """
+        STEP1.3.3 — best-effort runtime-персистентность.
+
+        Вызывается из UI (SnapshotService) не чаще, чем раз в N секунд.
+        Обновляет runtime_state на основе UI-снапшота (positions + meta),
+        не затрагивая sim-часть.
+        """
+        # Лёгкий time-based throttle, чтобы не заливать диск.
+        try:
+            now = time.time()
+            last = float(getattr(self, "_last_runtime_persist_ts", 0.0))
+            # не чаще раза в 5 секунд
+            if now - last < 5.0:
+                return
+        except Exception:
+            # если что-то пошло не так, не даём этому сломать UI
+            pass
+
+        if snapshot is None:
+            try:
+                snapshot = self.get_state_snapshot()
+            except Exception:
+                return
+
+        if not isinstance(snapshot, dict):
+            return
+
+        # Импортируем здесь, чтобы избежать циклов импортов.
+        try:
+            from core.runtime_persistence import persist_from_ui_snapshot
+        except Exception:
+            return
+
+        try:
+            persist_from_ui_snapshot(snapshot)
+            self._last_runtime_persist_ts = time.time()
+        except Exception:
+            # любые ошибки на этом пути не должны ломать UI
+            pass
+
+    def reset_sim_state(self) -> None:
+        """
+        Запрос от UI на полный сброс SIM-состояния.
+
+        UI не трогает файлы напрямую: всё идёт через core.runtime_state.reset_sim_state().
+        """
+        try:
+            reset_sim_state()
+        except Exception:
+            # Ошибки при сбросе SIM не должны ломать UI.
+            pass
+    
+    # ==============================
     #            ХУКИ UI
     # ==============================
-
     def _build_state_snapshot_for_binder(self) -> StateSnapshot:
         """
         Внутренний snapshot-provider для StateBinder.
@@ -518,6 +589,31 @@ class UIAPI:
             return float(last)
         except Exception:
             return None
+
+    # ==============================
+    #   TPSL SETTINGS ДЛЯ UI
+    # ==============================
+    def get_tpsl_settings_for_ui(self) -> Dict[str, Any]:
+        """
+        Отдать UI текущие TPSL-настройки.
+
+        UI получает только dict, без знания о runtime-файлах.
+        """
+        try:
+            return get_tpsl_settings()
+        except Exception:
+            # на уровне UIAPI возвращаем безопасный default
+            return {}
+
+    def update_tpsl_settings_from_ui(self, settings: Dict[str, Any]) -> None:
+        """
+        Обновить TPSL-настройки по запросу UI.
+        """
+        try:
+            update_tpsl_settings(settings)
+        except Exception:
+            # ошибки сохранения настроек не должны ронять UI
+            pass
 
     def preview(
         self,

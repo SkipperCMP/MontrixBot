@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import tkinter as tk
 from tkinter import ttk
 from typing import Any, Mapping, Sequence
@@ -221,3 +222,66 @@ class StatusBar:
     def update_last_deal(self, deal: Mapping[str, Any] | None) -> None:
         """Старое имя метода для обратной совместимости."""
         self.set_last_deal(deal)
+
+    def update_from_snapshot(self, snapshot: Mapping[str, Any] | None) -> None:
+        """
+        Обновляет health / lag / last deal по снапшоту StateEngine.
+
+        Ожидаемый формат snapshot:
+        {
+            "ts": <timestamp>,
+            "health": {
+                "latency_ms": <опционально>,
+                ...
+            },
+            "trades_recent": [ {...}, {...}, ... ]
+        }
+        """
+        snapshot = snapshot or {}
+        health: dict[str, Any] = {}
+
+        # health-блок
+        raw_health = snapshot.get("health")
+        if isinstance(raw_health, Mapping):
+            health = dict(raw_health)
+
+        # lag по health.latency_ms или по ts снапшота
+        lag_sec = 0
+        try:
+            latency_ms = health.get("latency_ms")
+            if latency_ms is not None:
+                lag_sec = max(0, int(float(latency_ms) / 1000.0))
+            else:
+                ts = snapshot.get("ts")
+                if ts is not None:
+                    try:
+                        ts_f = float(ts)
+                    except Exception:
+                        ts_f = time.time()
+                    lag_sec = max(0, int(time.time() - ts_f))
+        except Exception:
+            lag_sec = 0
+
+        # применяем lag в статус-бар
+        try:
+            self.set_lag(lag_sec)
+        except Exception:
+            # проблемы с лагом не должны ронять UI
+            pass
+
+        # последняя сделка
+        last_deal = None
+        rows = snapshot.get("trades_recent")
+        if isinstance(rows, Sequence) and rows:
+            last_deal = rows[-1]
+
+        try:
+            self.set_health(health)
+        except Exception:
+            pass
+
+        try:
+            self.set_last_deal(last_deal)
+        except Exception:
+            # не ломаем UI при странном формате снапшота
+            pass

@@ -1,25 +1,10 @@
 {
-  "safe_mode": true,
   "panic": {
-    "active": false,
-    "reason": "",
-    "since": null
+    "active": true,
+    "reason": "UI_PANIC_ADAUSDT",
+    "since": 1765108082.361297
   },
   "tpsl_autoloop": {
-    "enabled": true,
-    "interval_sec": 5,
-    "mode": "dynamic",
-    "min_move_pct": 0.35,
-    "hard_stop_pct": null,
-    "dynamic": {
-      "enabled": true,
-      "base_pct": 0.35,
-      "min_pct": 0.2,
-      "max_pct": 1.0,
-      "vol_window": 50
-    }
-  },
-  "advisor": {
     "enabled": false
   }
 }

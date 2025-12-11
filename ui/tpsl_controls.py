@@ -5,11 +5,16 @@ except Exception:
     tk = None
     ttk = None
 
-import json, os
 
 class TpslControls:
-    def __init__(self, parent, on_changed=None):
+    def __init__(self, parent, ui_api, on_changed=None):
+        """
+        parent  — родительский tkinter-виджет
+        ui_api  — экземпляр core.UIAPI (или совместимый объект)
+        on_changed — колбэк, вызывается после успешного применения настроек
+        """
         self.parent = parent
+        self.ui_api = ui_api
         self.on_changed = on_changed or (lambda: None)
         self._widgets = {}
 
@@ -19,35 +24,35 @@ class TpslControls:
         frm = ttk.Frame(self.parent)
         # Mode selector
         ttk.Label(frm, text="TPSL Mode:").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-        mode = ttk.Combobox(frm, values=["dynamic","static"], state="readonly", width=9)
+        mode = ttk.Combobox(frm, values=["dynamic", "static"], state="readonly", width=9)
         mode.grid(row=0, column=1, padx=4, pady=4, sticky="w")
-        mode.set(self._read("mode","dynamic"))
+        mode.set(self._read("mode", "dynamic"))
         self._widgets["mode"] = mode
 
         # Base pct
         ttk.Label(frm, text="Base %:").grid(row=0, column=2, padx=6, pady=4, sticky="e")
         base = ttk.Entry(frm, width=6)
-        base.insert(0, str(self._read(("dynamic","base_pct"), 0.35)))
+        base.insert(0, str(self._read(("dynamic", "base_pct"), 0.35)))
         base.grid(row=0, column=3, padx=4, pady=4)
         self._widgets["base"] = base
 
         # Min/Max pct
         ttk.Label(frm, text="Min %:").grid(row=0, column=4, padx=6, pady=4, sticky="e")
         vmin = ttk.Entry(frm, width=6)
-        vmin.insert(0, str(self._read(("dynamic","min_pct"), 0.2)))
+        vmin.insert(0, str(self._read(("dynamic", "min_pct"), 0.2)))
         vmin.grid(row=0, column=5, padx=4, pady=4)
         self._widgets["min"] = vmin
 
         ttk.Label(frm, text="Max %:").grid(row=0, column=6, padx=6, pady=4, sticky="e")
         vmax = ttk.Entry(frm, width=6)
-        vmax.insert(0, str(self._read(("dynamic","max_pct"), 1.0)))
+        vmax.insert(0, str(self._read(("dynamic", "max_pct"), 1.0)))
         vmax.grid(row=0, column=7, padx=4, pady=4)
         self._widgets["max"] = vmax
 
         # Window
         ttk.Label(frm, text="Win:").grid(row=0, column=8, padx=6, pady=4, sticky="e")
         win = ttk.Entry(frm, width=6)
-        win.insert(0, str(int(self._read(("dynamic","vol_window"), 50))))
+        win.insert(0, str(int(self._read(("dynamic", "vol_window"), 50))))
         win.grid(row=0, column=9, padx=4, pady=4)
         self._widgets["win"] = win
 
@@ -71,19 +76,25 @@ class TpslControls:
         return tp.get(key, default)
 
     def _load(self):
-        p = "runtime/settings.json"
-        if not os.path.exists(p):
-            return {}
+        """
+        ЧТЕНИЕ настроек через UIAPI (без прямого доступа к runtime/settings.json).
+        Ожидается, что ui_api реализует метод get_tpsl_settings_for_ui().
+        """
         try:
-            with open(p,"r",encoding="utf-8") as f:
-                return json.load(f)
+            cfg = self.ui_api.get_tpsl_settings_for_ui()
+            if isinstance(cfg, dict):
+                return cfg
+            return {}
         except Exception:
             return {}
 
     def _save(self, cfg):
+        """
+        ЗАПИСЬ настроек через UIAPI (без файлового I/O из UI).
+        Ожидается, что ui_api реализует метод update_tpsl_settings_from_ui().
+        """
         try:
-            with open("runtime/settings.json","w",encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            self.ui_api.update_tpsl_settings_from_ui(cfg)
             return True
         except Exception:
             return False
@@ -93,17 +104,20 @@ class TpslControls:
         tp = cfg.setdefault("tpsl_autoloop", {})
         tp["mode"] = self._widgets["mode"].get().lower()
         dyn = tp.setdefault("dynamic", {})
+
         def _f(v, dv):
             try:
                 return float(v)
             except Exception:
                 return dv
+
         dyn["base_pct"] = _f(self._widgets["base"].get(), 0.35)
-        dyn["min_pct"]  = _f(self._widgets["min"].get(), 0.2)
-        dyn["max_pct"]  = _f(self._widgets["max"].get(), 1.0)
+        dyn["min_pct"] = _f(self._widgets["min"].get(), 0.2)
+        dyn["max_pct"] = _f(self._widgets["max"].get(), 1.0)
         try:
             dyn["vol_window"] = int(float(self._widgets["win"].get()))
         except Exception:
             dyn["vol_window"] = 50
+
         self._save(cfg)
         self.on_changed()

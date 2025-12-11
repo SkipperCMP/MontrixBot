@@ -1,10 +1,16 @@
 
 # ui/health_widget.py
-import os, json, time
+import os
 import tkinter as tk
 from tkinter import ttk
 
-DEFAULT_LOG = os.path.join(os.path.dirname(os.path.dirname(__file__)), "runtime", "health.log")
+from core.health_api import load_health_snapshot
+
+DEFAULT_LOG = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "runtime",
+    "health.log",
+)
 
 class HealthPanel(ttk.Frame):
     def __init__(self, master=None, log_path: str = None, refresh_sec: int = 5, **kw):
@@ -52,68 +58,55 @@ class HealthPanel(ttk.Frame):
         self._refresh()
         self.after(self.refresh_sec * 1000, self._schedule_refresh)
 
-    def _parse_line(self, line: str):
-        # Expected format produced by health_monitor.py
-        # 2025-11-09 17:00:00 UTC | mode=REAL dry_run=True safe=ON | trades=553B open=2 close=2 active=[] last_ts=...
-        parts = [p.strip() for p in line.strip().split("|")]
-        if len(parts) < 3:
-            return None
-        ts = parts[0]
-        L = parts[2]  # right side
-        kv = {}
-        for token in L.split():
-            if "=" in token:
-                k,v = token.split("=",1)
-                kv[k]=v
-        trades = kv.get("trades","?")
-        open_ = kv.get("open","?")
-        close = kv.get("close","?")
-        active = kv.get("active","?")
-        last_ts = kv.get("last_ts","?")
-        # middle
-        mid = parts[1]
-        flags = {}
-        for token in mid.split():
-            if "=" in token:
-                k,v = token.split("=",1)
-                flags[k]=v
-        return ts, trades, open_, close, active, last_ts, flags
-
     def _refresh(self):
-        lines = []
+        """Обновляет таблицу health и бейджи, используя core.health_api."""
         try:
-            with open(self.log_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()[-200:]  # tail
-        except FileNotFoundError:
-            self.status.set(f"log: {self.log_path} (not found — run run_health.cmd)")
-            return
+            data = load_health_snapshot(self.log_path, max_lines=500)
         except Exception as e:
-            self.status.set(f"error reading log: {e}")
+            # любые проблемы HealthAPI не должны ломать UI
+            self.status.set(f"error: {e}")
             return
 
-        # Clear table
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
+        entries = data.get("entries") or []
+        last_flags = data.get("last_flags") or {}
+        last_ts_str = data.get("last_ts_str")
+        log_path = data.get("log_path") or self.log_path
 
-        last_flags = {}
-        last_ts_str = None
-        for ln in lines:
-            parsed = self._parse_line(ln)
-            if not parsed: 
+        # обновляем статусную строку
+        self.status.set(f"log: {log_path}")
+
+        # перерисовываем таблицу
+        try:
+            self.tree.delete(*self.tree.get_children())
+        except Exception:
+            return
+
+        for item in entries:
+            try:
+                ts = item.get("ts", "?")
+                trades = item.get("trades", "?")
+                open_ = item.get("open", "?")
+                close = item.get("close", "?")
+                active = item.get("active", "?")
+                last_ts = item.get("last_ts", "?")
+                self.tree.insert(
+                    "",
+                    "end",
+                    values=(ts, trades, open_, close, active, last_ts),
+                )
+            except Exception:
+                # одна битая запись не должна ломать остальные
                 continue
-            ts, trades, open_, close, active, last_ts, flags = parsed
-            self.tree.insert("", "end", values=(ts, trades, open_, close, active, last_ts))
-            last_flags = flags
-            last_ts_str = ts
 
-        # Update badges
-        mode = last_flags.get("mode","?")
-        dry = last_flags.get("dry_run","?")
-        safe = last_flags.get("safe","?")
+        # бейджи: mode / Dry-Run / SAFE
+        mode = last_flags.get("mode", "?")
+        dry = last_flags.get("dry_run", "?")
+        safe = last_flags.get("safe", "?")
         self.mode_var.set(f"Mode: {mode}")
         self.dry_var.set(f"Dry-Run: {dry}")
         self.safe_var.set(f"SAFE {safe}")
-        # age calc
+
+        # возраст последнего события
         if last_ts_str:
             try:
                 # 'YYYY-MM-DD HH:MM:SS UTC'

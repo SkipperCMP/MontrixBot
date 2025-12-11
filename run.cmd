@@ -1,1 +1,1 @@
-python ui/app_step9.py
+python -m ui.main_app

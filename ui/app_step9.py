@@ -36,6 +36,22 @@ except Exception:
     except Exception:
         apply_neutral_dark = None  # type: ignore[assignment]
 
+
+from ui.layout.topbar import create_topbar
+from ui.layout.positions_panel import create_positions_panel
+from ui.layout.deals_panel import create_deals_panel
+from ui.layout.styles import apply_styles
+
+from ui.controllers.mode_controller import ModeController
+from ui.controllers.positions_controller import PositionsController
+from ui.controllers.chart_controller import ChartController
+from ui.controllers.autosim_controller import AutosimController
+
+from ui.services.snapshot_service import SnapshotService
+from ui.services.ui_updater import UIRefreshService
+from ui.services.tick_updater import TickUpdater
+
+
 from tools.formatting import fmt_price, fmt_pnl
 
 from runtime.sim_state_tools import load_sim_state, save_sim_state
@@ -227,6 +243,36 @@ class App(tk.Tk):
         self.safe_on: bool = False
         self._mode: str = "SIM"
 
+        # Контроллер режимов / SAFE / Dry-Run
+        self.mode_controller = ModeController(self, SAFE_FILE)
+
+        # Контроллер графиков (RSI / LIVE Chart)
+        self.chart_controller = ChartController(self, ChartPanel)
+        
+        # Сервис снапшота ядра (equity + статус-бар + deals journal)
+        self.snapshot_service = SnapshotService(self)
+
+        # Контроллер панели активных позиций (Active position (SIM))
+        # Важно: передаём только безопасный UIAPI-геттер,
+        # чтобы не ломать изоляцию слоёв.
+        self.positions_controller = PositionsController(
+            app=self,
+            uiapi_getter=self._ensure_uiapi,
+        )
+
+        # Контроллер AUTOSIM (ручное управление симулятором через UI)
+        self.autosim_controller = AutosimController(
+            app=self,
+            ui_state=None,  # UIState подключим позже, когда начнём его реально использовать
+            uiapi_getter=self._ensure_uiapi,
+            save_sim_state_fn=save_sim_state,
+            journal_file=JOURNAL_FILE,
+        )
+
+        # TickUpdater — ранний TickService / Update Router для tick-снапшотов ядра.
+        # Не имеет собственного цикла, живёт внутри SnapshotService/UIRefreshService.
+        self.tick_updater = TickUpdater(self)
+
         # UI-флаг для Dry-Run бейджа (пока влияет только на внешний вид и логи)
         self.dry_run_ui_on: bool = True
 
@@ -257,12 +303,23 @@ class App(tk.Tk):
             except Exception:
                 self._autosim = None
 
-        self._build_styles()
-        self._build_topbar()
-        self._build_paths()
-        self._build_activepos()
-        self._build_log()
+        # STEP1.3.1: стили вынесены в ui.layout.styles.apply_styles
+        apply_styles(self, apply_neutral_dark)
+
+        # STEP1.3.1: topbar + paths вынесены в ui.layout.topbar
+        create_topbar(self, DEFAULT_SYMBOLS, JOURNAL_FILE, RUNTIME_DIR)
+
+        # STEP1.3.1: панель активной позиции вынесена в ui.layout.positions_panel
+        create_positions_panel(self)
+
+        # STEP1.3.1: лог-панель + StatusBar вынесены в ui.layout.deals_panel
+        create_deals_panel(self, StatusBar)
+
+        # 1) автоподхват SIM-состояния (через runtime_state / UIAPI)
         self._load_sim_state_from_file()
+
+        # 2) одноразовая инициализация UI из runtime_state (equity / meta)
+        self._init_from_runtime_state()
 
         # режим по умолчанию — SIM (через UIAPI)
         self._set_mode("SIM")
@@ -278,137 +335,21 @@ class App(tk.Tk):
         self._log_diag_startup()
 
         self._refresh_safe_badge()
-        self.after(1000, self._periodic_refresh)
 
-    # ------------------------------------------------------------------ UI --
-    def _build_styles(self) -> None:
-        """
-        Step 1.2.8:
-        - вместо локальной простенькой темы используем ui.theme_dark.apply_neutral_dark
-        - оставляем fallback на старые стили, если модуль недоступен
-        """
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
+        # STEP1.3.1: цикл обновления UI вынесен в UIRefreshService
+        self.refresh_service = UIRefreshService(self, interval_ms=1000)
+        self.refresh_service.start()
 
-        # Пытаемся применить общую dark-тему
-        palette_bg = None
-        if apply_neutral_dark is not None:
-            try:
-                palette = apply_neutral_dark(style)
-                if isinstance(palette, dict):
-                    palette_bg = palette.get("bg")
-            except Exception:
-                palette_bg = None
-
-        # Fallback на старую схему, если тема не применилась
-        if palette_bg is None:
-            # старые значения из app_step9 (ранее app_step8)
-            bg = "#1c1f24"
-            fg = "#e6e6e6"
-            muted = "#9aa0a6"
-
-            style.configure("Dark.TFrame", background=bg)
-            style.configure("Dark.TLabel", background=bg, foreground=fg)
-            style.configure("Muted.TLabel", background=bg, foreground=muted)
-            style.configure(
-                "BadgeSafe.TLabel",
-                background="#26a269",
-                foreground="#0b0b0b",
-                padding=(8, 2),
-            )
-            style.configure(
-                "BadgeWarn.TLabel",
-                background="#d0b343",
-                foreground="#0b0b0b",
-                padding=(8, 2),
-            )
-            style.configure(
-                "BadgeDanger.TLabel",
-                background="#e01b24",
-                foreground="#0b0b0b",
-                padding=(8, 2),
-            )
-        else:
-            # если тема отдала палитру — подстраиваем фон окна под неё
-            try:
-                self.configure(bg=palette_bg)
-            except Exception:
-                pass
-
-        # Общие стили кнопок / полей
-        style.configure("Dark.TButton", padding=6)
-        style.map("Dark.TButton", background=[("active", "#2a2f36")])
-
-        style.configure("Log.TFrame", background="#121417")
-        style.configure(
-            "EntryDark.TEntry",
-            fieldbackground="#121417",
-            foreground="#e6e6e6",
-        )
-        style.configure(
-            "ComboDark.TCombobox",
-            fieldbackground="#121417",
-            foreground="#e6e6e6",
-        )
-
-    def _build_topbar(self) -> None:
-        """Построение верхней панели вынесено в ui.widgets.controls_bar."""
-        try:
-            from .widgets.controls_bar import build_topbar_ui  # type: ignore
-        except Exception:
-            # запуск как скрипт: python ui/app_step9.py
-            root = Path(__file__).resolve().parent.parent
-            if str(root) not in sys.path:
-                sys.path.insert(0, str(root))
-            from ui.widgets.controls_bar import build_topbar_ui  # type: ignore
-
-        build_topbar_ui(self, DEFAULT_SYMBOLS)
-
-    def _build_paths(self) -> None:
-        """Строка с кнопками журналов/графиков — вынесена в ui.widgets.controls_bar."""
-        try:
-            from .widgets.controls_bar import build_paths_ui  # type: ignore
-        except Exception:
-            # запуск как скрипт: python ui/app_step8.py
-            root = Path(__file__).resolve().parent.parent
-            if str(root) not in sys.path:
-                sys.path.insert(0, str(root))
-            from ui.widgets.controls_bar import build_paths_ui  # type: ignore
-
-        build_paths_ui(self, JOURNAL_FILE, RUNTIME_DIR)
-
-    def _build_activepos(self) -> None:
-        """Панель активной позиции вынесена в ui.widgets.positions_panel."""
-        try:
-            from .widgets.positions_panel import build_activepos_ui  # type: ignore
-        except Exception:
-            # запуск как скрипт: python ui/app_step8.py
-            root = Path(__file__).resolve().parent.parent
-            if str(root) not in sys.path:
-                sys.path.insert(0, str(root))
-            from ui.widgets.positions_panel import build_activepos_ui  # type: ignore
-
-        build_activepos_ui(self)
-
-    def _build_log(self) -> None:
-        """Лог-панель вынесена в ui.widgets.log_panel."""
-        try:
-            from .widgets.log_panel import build_log_ui  # type: ignore
-        except Exception:
-            # запуск как скрипт: python ui/app_step8.py
-            root = Path(__file__).resolve().parent.parent
-            if str(root) not in sys.path:
-                sys.path.insert(0, str(root))
-            from ui.widgets.log_panel import build_log_ui  # type: ignore
-
-        build_log_ui(self, StatusBar)
-
-    # ------------------------------------------------------------- helpers --
+    # ------------------------------------------------------------------ UI --    # ------------------------------------------------------------- helpers --
     def _load_sim_state_from_file(self) -> None:
-        """Пробуем подхватить последний снимок SIM из sim_state.json при старте."""
+        """
+        Пытаемся восстановить последний снимок SIM при старте UI.
+
+        ВАЖНО:
+        - UI больше не читает runtime/sim_state.json напрямую;
+        - все обращения идут через UIAPI → core.runtime_state.load_runtime_state();
+        - sim-состояние берётся из runtime-снапшота по ключу "sim".
+        """
         # При активном PANIC авто-восстановление запрещено
         try:
             if is_panic_active():
@@ -421,25 +362,93 @@ class App(tk.Tk):
             # Если даже проверка PANIC рухнула — просто не восстанавливаем
             return
 
+        # Дальше работаем только через UIAPI / runtime_state
         try:
-            snapshot = load_sim_state()
+            uiapi = self._ensure_uiapi()
+            if uiapi is None or not hasattr(uiapi, "get_runtime_state_snapshot"):
+                # UIAPI недоступен — нечего восстанавливать
+                return
+
+            runtime_snapshot = uiapi.get_runtime_state_snapshot() or {}
         except Exception as e:  # noqa: BLE001
             try:
-                self._log(f"[SIM] failed to load sim_state.json: {e}")
+                self._log(f"[SIM] failed to load runtime_state snapshot: {e}")
             except Exception:
                 pass
             return
 
+        # Из объединённого runtime-состояния берём SIM-секцию.
+        # Формат sim_state.json: { "ts": ..., "symbol": ..., "portfolio": {...}, "active": [...], ... }
+        try:
+            snapshot = runtime_snapshot.get("sim") or {}
+        except Exception:
+            snapshot = {}
+
         if not snapshot:
+            # Нет sim-состояния — просто выходим
             return
 
+        # Уже существующий метод, который красиво рисует таблицу Active position (SIM)
         try:
-            # Уже существующий метод, который красиво рисует таблицу Active position (SIM)
             self._update_active_from_sim(snapshot)
         except Exception:
-            # Если формат файла изменился/битый — просто молча игнорируем
+            # Если формат снапшота изменился/битый — просто молча игнорируем
+            # (UI не должен падать из-за проблем с runtime-файлами)
             pass
-    
+
+    def _init_from_runtime_state(self) -> None:
+        """
+        Одноразовая инициализация UI из runtime_state через UIAPI.
+
+        Цель:
+        - аккуратно подхватить last-known equity / pnl из runtime/state.json,
+          не читая файл напрямую;
+        - обновить мини-панель Equity до первого снапшота StateEngine.
+
+        Формат runtime_state (см. core/runtime_state.py):
+
+            {
+                "positions": {...},
+                "meta": {...},
+                "sim": {...}
+            }
+
+        Здесь мы используем только блок "meta": предполагается, что там
+        находятся агрегированные метрики портфеля (equity, pnl_*).
+        """
+        # UI должен ходить только через UIAPI → runtime_state
+        try:
+            api = self._ensure_uiapi()
+            if api is None or not hasattr(api, "get_runtime_state_snapshot"):
+                return
+
+            runtime_snapshot = api.get_runtime_state_snapshot() or {}
+            if not isinstance(runtime_snapshot, dict):
+                return
+        except Exception:
+            # Любые проблемы runtime_state не должны ломать старт UI
+            return
+
+        # Аккуратно достаём meta-блок
+        try:
+            meta = runtime_snapshot.get("meta") or {}
+        except Exception:
+            meta = {}
+
+        if not isinstance(meta, dict) or not meta:
+            # Нечего инициализировать
+            return
+
+        # Готовим "псевдо-снапшот" в формате, который ожидает _update_equity_bar:
+        # snapshot["portfolio"] — словарь с equity / pnl_*.
+        fake_snapshot = {"portfolio": dict(meta)}
+
+        try:
+            self._update_equity_bar(fake_snapshot)
+        except Exception:
+            # Мини-панель Equity — вспомогательный элемент, падать из-за неё нельзя
+            return
+
     def _set_active_text(self, text: str) -> None:
         """
         Заполняет панель Active positions и подсвечивает:
@@ -586,354 +595,22 @@ class App(tk.Tk):
             return
 
     def _update_active_from_sim(self, snapshot: dict) -> None:
-        """Update Active position panel.
+        """Delegates Active position panel update to PositionsController.
 
-        1) Пытаемся взять позиции из ядра (UIAPI.get_state_snapshot -> positions + ticks).
-        2) Если там пусто/ошибка — используем snapshot["active"] от AUTOSIM, как раньше.
+        Публичный API метода сохраняется (все вызовы внутри App продолжают
+        использовать _update_active_from_sim), но сама логика вынесена
+        в ui.controllers.positions_controller.PositionsController.
         """
-
-        # --- базовый active от AUTOSIM (старое поведение) ---
-        try:
-            autosim_active = snapshot.get("active") or []
-        except Exception:
-            autosim_active = []
-
-        # --- пробуем собрать active из ядра (TPSL + StateEngine) ---
-        core_active = []
-        try:
-            api = self._ensure_uiapi()
-            if api is not None and hasattr(api, "get_state_snapshot"):
-                se_snap = api.get_state_snapshot() or {}
-                positions = se_snap.get("positions") or {}
-                ticks = se_snap.get("ticks") or {}
-
-                for sym, pos in positions.items():
-                    try:
-                        sym_u = str(sym or "").upper()
-                        side = str(pos.get("side", "") or "")
-                        qty = float(pos.get("qty", 0.0) or 0.0)
-                        entry = float(pos.get("entry", 0.0) or 0.0)
-
-                        tick = ticks.get(sym_u, {}) or {}
-                        last_raw = tick.get("last", entry)
-                        try:
-                            last = float(last_raw)
-                        except Exception:
-                            last = entry
-
-                        # считаем PnL% по side
-                        pnl_pct = 0.0
-                        if entry > 0.0 and last > 0.0:
-                            side_u = side.upper()
-                            if side_u.startswith("LONG") or side_u == "BUY":
-                                pnl_pct = (last - entry) / entry * 100.0
-                            elif side_u.startswith("SHORT") or side_u == "SELL":
-                                pnl_pct = (entry - last) / entry * 100.0
-
-                        core_active.append(
-                            {
-                                "symbol": sym_u,
-                                "side": side,
-                                "qty": qty,
-                                "entry_price": entry,
-                                "current_price": last,
-                                "unrealized_pnl_pct": pnl_pct,
-                                "tp": float(pos.get("tp", 0.0) or 0.0),
-                                "sl": float(pos.get("sl", 0.0) or 0.0),
-                                # hold_days пока не считаем для TPSL-позиций
-                                "hold_days": float(0.0),
-                            }
-                        )
-                    except Exception:
-                        continue
-        except Exception:
-            core_active = []
-
-        # --- выбираем источник: ядро > AUTOSIM ---
-        if core_active:
-            active = core_active
-        else:
-            active = autosim_active
-
-        if not active:
-            self._set_active_text("— no active positions —")
-            return
-
-        def _format_hold(hold_days: float) -> str:
-            """Преобразовать количество дней в человекочитаемый формат."""
-            try:
-                total_minutes = int(float(hold_days) * 24 * 60)
-            except Exception:
-                return "--:--"
-
-            if total_minutes < 0:
-                total_minutes = 0
-
-            days = total_minutes // (24 * 60)
-            rem = total_minutes % (24 * 60)
-            hours = rem // 60
-            minutes = rem % 60
-
-            if days <= 0:
-                # только часы:минуты
-                return f"{hours:02d}:{minutes:02d}"
-            # дни + часы:минуты
-            return f"{days}d {hours:02d}:{minutes:02d}"
-
-        lines: list[str] = []
-        header = "{:<10} {:<6} {:>9} {:>10} {:>10} {:>10} {:>7} {:>10} {:>10} {:>9} {:>5}".format(
-            "Symbol",
-            "Side",
-            "Qty",
-            "Entry",
-            "Last",
-            "Value",
-            "Pnl%",
-            "TP",
-            "SL",
-            "Hold",
-            "Trend",
-        )
-        lines.append(header)
-        lines.append("-" * len(header))
-
-        for pos in active:
-            symbol = str(pos.get("symbol", ""))
-            side = str(pos.get("side", ""))[:6]
-            qty = float(pos.get("qty", 0.0) or 0.0)
-            entry = float(pos.get("entry_price", 0.0) or 0.0)
-            last = float(pos.get("current_price", 0.0) or 0.0)
-
-            # базовый PnL% из снапшота (если есть)
-            try:
-                pnl_pct = float(pos.get("unrealized_pnl_pct", 0.0) or 0.0)
-            except Exception:
-                pnl_pct = 0.0
-
-            # если движок не посчитал PnL%, считаем сами
-            if entry > 0.0 and last > 0.0:
-                try:
-                    if abs(pnl_pct) < 0.0001:
-                        side_u = side.upper()
-                        if side_u.startswith("LONG") or side_u == "BUY":
-                            pnl_pct = (last - entry) / entry * 100.0
-                        elif side_u.startswith("SHORT") or side_u == "SELL":
-                            pnl_pct = (entry - last) / entry * 100.0
-                except Exception:
-                    pass
-
-            # стоимость позиции
-            try:
-                value = qty * last
-            except Exception:
-                value = 0.0
-
-            tp = float(pos.get("tp", 0.0) or 0.0)
-            sl = float(pos.get("sl", 0.0) or 0.0)
-            hold_days = float(pos.get("hold_days", 0.0) or 0.0)
-            hold_str = _format_hold(hold_days)
-            
-            # маркер тренда по знаку PnL% (используем пули, цвет задаётся тегами)
-            if pnl_pct > 0.1:
-                trend_mark = "●"
-            elif pnl_pct < -0.1:
-                trend_mark = "●"
-            else:
-                trend_mark = "·"
-            line = (
-                "{:<10} {:<6} {:>9.4f} {:>10.4f} {:>10.4f} {:>10.2f} "
-                "{:>7.2f} {:>10.4f} {:>10.4f} {:>9} {:>5}"
-            ).format(
-                symbol,
-                side,
-                qty,
-                entry,
-                last,
-                value,
-                pnl_pct,
-                tp,
-                sl,
-                hold_str,
-                trend_mark,
-            )
-            lines.append(line)
-
-        self._set_active_text("\n".join(lines))
-
-    def _update_equity_bar(self, snapshot: dict) -> None:
-        """Обновляет мини-панель Equity на верхней панели.
-
-        Формат (компактный, читаемый):
-            Eqt 1 000.00   D +0.31%   P +7.86/+0.79%   L 102.44   E[t123 v45 U]
-        """
-        # если по какой-то причине var_equity ещё не создана — тихо выходим
-        if not hasattr(self, "var_equity"):
-            return
-
-        snapshot = snapshot or {}
-
-        # аккуратно достаём портфель из снапшота
-        try:
-            portfolio = snapshot.get("portfolio") or {}
-        except Exception:
-            self.var_equity.set("Eqt —")
-            return
-
-        eq = portfolio.get("equity")
-        if eq is None:
-            self.var_equity.set("Eqt —")
+        ctrl = getattr(self, "positions_controller", None)
+        if ctrl is None:
+            # Если контроллер по какой-то причине не создан —
+            # просто не трогаем панель.
             return
 
         try:
-            eq_f = float(eq)
+            ctrl.update_from_snapshot(snapshot)
         except Exception:
-            self.var_equity.set("Eqt —")
-            return
-
-        # --- общий PnL (в процентах) ---
-        total_pct = None
-        try:
-            total_pct_val = portfolio.get("pnl_total_pct", None)
-            if total_pct_val is not None:
-                total_pct = float(total_pct_val)
-        except Exception:
-            total_pct = None
-
-        # дифф по equity (если есть общий PnL и equity)
-        total_diff = None
-        if total_pct is not None:
-            try:
-                total_diff = eq_f * float(total_pct) / 100.0
-            except Exception:
-                total_diff = None
-
-        # --- дневной PnL ---
-        day_pct = None
-        try:
-            day_val = portfolio.get("pnl_day_pct", None)
-            if day_val is not None:
-                day_pct = float(day_val)
-        except Exception:
-            day_pct = None
-
-        # --- last price из StateEngine / UIAPI ---
-        last_price = None
-        try:
-            api = self._ensure_uiapi()
-            if api is not None and hasattr(api, "get_last_price"):
-                # symbol берётся из UIAPI.current_symbol, который мы синхронизируем
-                last_price = api.get_last_price()
-        except Exception:
-            last_price = None
-
-        # --- mini engine status из снапшота ядра ---
-        eng_ticks = None
-        eng_ver = None
-        eng_trend = None
-        try:
-            api2 = self._ensure_uiapi()
-            if api2 is not None and hasattr(api2, "get_state_snapshot"):
-                eng_snap = api2.get_state_snapshot() or {}
-                ticks_dict = eng_snap.get("ticks") or {}
-                try:
-                    eng_ticks = len(ticks_dict)
-                except Exception:
-                    eng_ticks = None
-                eng_ver = eng_snap.get("version")
-                eng_trend = eng_snap.get("trend")
-        except Exception:
-            pass
-
-        # --- формируем строку (компактную и читабельную) ---
-        parts: list[str] = []
-
-        # Equity (с разделителями тысяч)
-        try:
-            parts.append(f"Eqt {fmt_price(eq_f)}")
-        except Exception:
-            parts.append(f"Eqt {eq_f:.2f}")
-
-        # Day PnL (если есть) — иначе ставим плейсхолдер, чтобы выровнять строку
-        if day_pct is not None:
-            try:
-                parts.append(f"D {fmt_pnl(day_pct)}%")
-            except Exception:
-                parts.append(f"D {day_pct:+.2f}%")
-        else:
-            parts.append("D —%")
-
-        # Total PnL (если есть) — иначе плейсхолдер
-        if total_pct is not None:
-            try:
-                if total_diff is not None:
-                    parts.append(f"P {fmt_pnl(total_diff)}/{fmt_pnl(total_pct)}%")
-                else:
-                    parts.append(f"P {fmt_pnl(total_pct)}%")
-            except Exception:
-                if total_diff is not None:
-                    parts.append(f"P {total_diff:+.2f}/{total_pct:+.2f}%")
-                else:
-                    parts.append(f"P {total_pct:+.2f}%")
-        else:
-            parts.append("P —%")
-
-        # Mode (SIM/REAL) и SAFE ON/OFF — компактный блок после PnL
-        try:
-            mode = None
-            try:
-                # сначала пробуем взять режим из снапшота (UIAPI/state_engine)
-                mode = snapshot.get("mode")
-            except Exception:
-                mode = None
-            if not mode:
-                # fallback: внутреннее поле UI
-                mode = getattr(self, "_mode", "SIM")
-            mode_str = str(mode).upper()
-            parts.append(f"M:{mode_str}")
-        except Exception:
-            pass
-
-        try:
-            # SAFE-индикатор берём из флага UI
-            safe_on = bool(getattr(self, "safe_on", False))
-            safe_text = "SAFE:ON" if safe_on else "SAFE:OFF"
-            parts.append(safe_text)
-        except Exception:
-            pass
-
-        # Last price
-        if last_price is not None:
-            try:
-                parts.append(f"L {fmt_price(last_price)}")
-            except Exception:
-                try:
-                    parts.append(f"L {float(last_price):.2f}")
-                except Exception:
-                    pass
-
-        # Engine compact format
-        try:
-            t = f"t{eng_ticks}" if eng_ticks is not None else ""
-            v = f"v{eng_ver}" if eng_ver is not None else ""
-            tr = eng_trend[0].upper() if isinstance(eng_trend, str) and eng_trend else ""
-            eng = " ".join(s for s in (t, v, tr) if s).strip()
-            if eng:
-                parts.append(f"E[{eng}]")
-        except Exception:
-            pass
-
-        text = "   ".join(parts) if parts else "Eqt —"
-        # избегаем лишних перерисовок и ловим TclError, если окно уже закрыто
-        try:
-            current = self.var_equity.get()
-        except Exception:
-            current = None
-        if current == text:
-            return
-        try:
-            self.var_equity.set(text)
-        except tk.TclError:
-            # виджет уже уничтожен — просто выходим
+            # панель активных позиций не должна ломать основной UI
             return
 
     def _append_equity_history(self, snapshot: dict) -> None:
@@ -996,7 +673,7 @@ class App(tk.Tk):
             return
             
     def _update_status_bar(self, snapshot: dict | None) -> None:
-        """Обновляет StatusBar: режим, lag, health и последнюю сделку."""
+        """Обновляет StatusBar: режим и передаёт снапшот самому виджету."""
         # сначала пробуем обновить мини-панель портфеля
         try:
             self._update_equity_bar(snapshot)
@@ -1016,50 +693,12 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # --- HEALTH + LAG ---
-        health = {}
-        raw_health = snapshot.get("health")
-        if isinstance(raw_health, dict):
-            health = raw_health
-
-        lag_sec = 0
+        # остальное (health / lag / last deal) делегируем самому StatusBar
         try:
-            # если есть latency_ms в health — используем его
-            latency_ms = health.get("latency_ms")
-            if latency_ms is not None:
-                lag_sec = max(0, int(float(latency_ms) / 1000.0))
-            else:
-                # иначе считаем lag по ts снапшота
-                ts = snapshot.get("ts")
-                if ts is not None:
-                    try:
-                        ts_f = float(ts)
-                    except Exception:
-                        ts_f = float(time.time())
-                    lag_sec = max(0, int(time.time() - ts_f))
+            # новый метод виджета, который умеет разбирать снапшот
+            sb.update_from_snapshot(snapshot)
         except Exception:
-            lag_sec = 0
-
-        try:
-            sb.set_lag(lag_sec)
-        except Exception:
-            pass
-
-        try:
-            sb.set_health(health)
-        except Exception:
-            pass
-
-        # --- LAST DEAL ---
-        try:
-            last_deal = None
-            rows = snapshot.get("trades_recent")
-            if isinstance(rows, list) and rows:
-                # берём самую свежую запись
-                last_deal = rows[-1]
-            sb.set_last_deal(last_deal)
-        except Exception:
-            # не ломаем UI при странном формате снапшота
+            # статус-бар не должен ломать основной UI
             pass
 
     def _on_reset_sim(self) -> None:
@@ -1080,12 +719,16 @@ class App(tk.Tk):
                             pass
             self._sim_log_state = None
             self._sim_symbol = None
+
+            # Просим ядро сбросить SIM-состояние через UIAPI → runtime_state.
             try:
-                sim_state_path = RUNTIME_DIR / "sim_state.json"
-                if sim_state_path.exists():
-                    sim_state_path.unlink()
+                api = self._ensure_uiapi()
+                if api is not None and hasattr(api, "reset_sim_state"):
+                    api.reset_sim_state()
             except Exception:
+                # Сброс SIM не должен ронять UI
                 pass
+
             self._set_active_text("— no active positions —")
             self._log("[SIM] reset requested")
         except Exception as e:
@@ -1167,124 +810,32 @@ class App(tk.Tk):
             messagebox.showinfo("Open", f"Path not found: {p}")
 
     def _safe_is_on(self) -> bool:
-        try:
-            return SAFE_FILE.exists()
-        except Exception:
-            return False
+        """Proxy: делегирует проверку SAFE контроллеру режима."""
+        return self.mode_controller.safe_is_on()
 
     def _refresh_safe_badge(self) -> None:
-        self.safe_on = self._safe_is_on()
-        if self.safe_on:
-            self.badge_safe.configure(text="SAFE", style="BadgeSafe.TLabel")
-        else:
-            self.badge_safe.configure(text="SAFE OFF", style="BadgeDanger.TLabel")
-
-        # SAFE блокирует только REAL-закрытие
-        mode = getattr(self, "_mode", "SIM")
-        if mode == "REAL":
-            self.btn_close.configure(state="disabled" if self.safe_on else "normal")
-        else:
-            self.btn_close.configure(state="normal")
+        """Proxy: обновление SAFE-бейджа через контроллер режима."""
+        self.mode_controller.refresh_safe_badge()
 
     def _toggle_safe(self) -> None:
-        """Переключение SAFE_MODE по клику на бейдже."""
-        try:
-            if SAFE_FILE.exists():
-                # выключаем SAFE
-                try:
-                    SAFE_FILE.unlink()
-                except FileNotFoundError:
-                    pass
-                self._log("[SAFE] SAFE_MODE disabled via UI (REAL close allowed)")
-            else:
-                SAFE_FILE.touch()
-                self._log("[SAFE] SAFE_MODE enabled via UI (REAL close blocked)")
-        except Exception as e:  # noqa: BLE001
-            try:
-                self._log(f"[SAFE][ERR] cannot toggle SAFE_MODE: {e!r}")
-            except Exception:
-                pass
-        # обновляем бейдж и состояние кнопки Close
-        try:
-            self._refresh_safe_badge()
-        except Exception:
-            pass
+        """Proxy: переключение SAFE_MODE через контроллер режима."""
+        self.mode_controller.toggle_safe()
 
     def _refresh_dry_badge(self) -> None:
-        """Обновляет внешний вид бейджа Dry-Run по self.dry_run_ui_on."""
-        # если бейдж ещё не создан (ранний вызов) — просто выходим
-        badge = getattr(self, "badge_dry", None)
-        if badge is None:
-            return
-
-        try:
-            val = bool(getattr(self, "dry_run_ui_on", True))
-        except Exception:
-            val = True
-        self.dry_run_ui_on = val
-
-        text = "Dry-Run" if val else "REAL CLI"
-        style = "BadgeWarn.TLabel" if val else "BadgeDanger.TLabel"
-
-        try:
-            badge.configure(text=text, style=style)
-        except tk.TclError:
-            return
+        """Proxy: обновление Dry-Run бейджа через контроллер режима."""
+        self.mode_controller.refresh_dry_badge()
 
     def _toggle_dry(self) -> None:
-        """Переключение Dry-Run бейджа (пока влияет только на UI и логи)."""
-        try:
-            current = bool(getattr(self, "dry_run_ui_on", True))
-        except Exception:
-            current = True
-        self.dry_run_ui_on = not current
-
-        state = "ON" if self.dry_run_ui_on else "OFF"
-        try:
-            self._log(f"[DRY] Dry-Run badge toggled to {state} (UI only, CLI still uses --ask)")
-        except Exception:
-            pass
-
-        try:
-            self._refresh_dry_badge()
-        except Exception:
-            pass
+        """Proxy: переключение Dry-Run бейджа через контроллер режима."""
+        self.mode_controller.toggle_dry()
 
     def _set_mode(self, mode: str) -> None:
-        """Переключение режима UI: SIM или REAL."""
-        mode = (mode or "SIM").upper()
-        self._mode = mode
-        if hasattr(self, "var_mode"):
-            self.var_mode.set(f"Mode: {mode}")
-
-        # Перепривязываем команды кнопок в зависимости от режима
-        if mode == "SIM":
-            self.btn_buy.configure(command=self.on_buy_sim)
-            self.btn_close.configure(command=self.on_close_sim)
-        else:
-            self.btn_buy.configure(command=self.on_buy_real)
-            self.btn_close.configure(command=self.on_close_real)
-
-        # После смены режима обновим SAFE-индикацию
-        try:
-            self._refresh_safe_badge()
-        except Exception:
-            pass
+        """Proxy: переключение режима SIM/REAL через контроллер."""
+        self.mode_controller.set_mode(mode)
 
     def _toggle_mode(self) -> None:
-        new_mode = "REAL" if getattr(self, "_mode", "SIM") == "SIM" else "SIM"
-        self._set_mode(new_mode)
-        
-        # NEW: если UIAPI уже создан, обновляем режим и в ядре
-        
-        api = getattr(self, "_uiapi", None)
-        if api is not None:
-            try:
-                api.set_mode(new_mode)
-            except Exception:
-                pass
-                
-        self._log(f"[UI] switched mode to {new_mode}")
+        """Proxy: смена режима SIM/REAL через контроллер."""
+        self.mode_controller.toggle_mode()
 
     def _set_status(self, text: str) -> None:
         self.title(f"{APP_TITLE} — {text}" if text else APP_TITLE)
@@ -1339,32 +890,19 @@ class App(tk.Tk):
             self._log("[DIAG] advisor OK (core.advisor)")
 
     # ----------------------------------------------------- periodic tasks --
-    
+
     def _periodic_refresh(self) -> None:
-        """Периодический апдейт SAFE, Dry-Run, индикаторов, сигналов и мини-панелей (раз в ~1 c)."""
-        try:
-            # SAFE-индикатор
-            self._refresh_safe_badge()
+        """Proxy: делегирует периодический рефреш сервису UIRefreshService.
 
-            # Dry-Run бейдж (пока чисто UI)
-            self._refresh_dry_badge()
-
-            # индикаторы + сигналы + AUTOSIM
-            self._refresh_indicators_and_signal()
-
-            # синхронизируем текущий символ в ядро (UIAPI)
-            self._push_current_symbol_to_uiapi()
-
-            # НОВОЕ: подтягиваем снапшот из StateEngine/UIAPI
-            # и обновляем мини-equity + статус-бар
-            self._refresh_from_core_snapshot()
-        except Exception as e:  # noqa: BLE001
-            try:
-                self._log(f"[DIAG] periodic error: {e!r}")
-            except Exception:
-                pass
-        finally:
-            self.after(1000, self._periodic_refresh)
+        Оставлен для обратной совместимости: старый код может вызывать
+        _periodic_refresh напрямую.
+        """
+        # Если по какой-то причине сервис ещё не создан или остановлен,
+        # безопасно выходим.
+        svc = getattr(self, "refresh_service", None)
+        if svc is None:
+            return
+        svc.periodic_refresh()
   
     def _push_current_symbol_to_uiapi(self) -> None:
         """Отправить текущий символ из UI в UIAPI."""
@@ -1383,44 +921,11 @@ class App(tk.Tk):
             pass
 
     def _refresh_from_core_snapshot(self) -> None:
-        """Обновление мини-панелей (equity + статус-бар) из ядра (UIAPI/StateEngine)."""
-        try:
-            api = self._ensure_uiapi()
-            if api is None or not hasattr(api, "get_state_snapshot"):
-                return
-
-            snapshot = api.get_state_snapshot()
-            if not isinstance(snapshot, dict):
-                return
-        except Exception:
+        """Proxy: обновление мини-панелей из снапшота ядра через SnapshotService."""
+        svc = getattr(self, "snapshot_service", None)
+        if svc is None:
             return
-
-        # 1) equity обновляем только если в snapshot['portfolio'] есть корректное значение
-        try:
-            portfolio = snapshot.get("portfolio") or {}
-            eq = portfolio.get("equity")
-        except Exception:
-            eq = None
-
-        if eq is not None:
-            try:
-                self._update_equity_bar(snapshot)
-            except Exception:
-                pass
-
-        # 2) статус-бар обновляем всегда (там важен lag/режим)
-        try:
-            self._update_status_bar(snapshot)
-        except Exception:
-            pass
-            
-        # 3) журнал сделок (если зарегистрирован)
-        try:
-            dj = getattr(self, "_deals_journal_widget", None)
-            if dj is not None and hasattr(dj, "update_from_snapshot"):
-                dj.update_from_snapshot(snapshot)
-        except Exception:
-            pass
+        svc.refresh_from_core_snapshot()
 
     # ----------------------------------------------------- indicators I/O --
     def _load_chart_prices(self, max_points: int = 300) -> Tuple[List[int], List[float]]:
@@ -1858,48 +1363,12 @@ class App(tk.Tk):
 
 
     def _open_rsi_chart(self) -> None:
-        if ChartPanel is None:
-            messagebox.showwarning("RSI Chart", "ChartPanel / matplotlib недоступны.")
-            return
-
-        win = tk.Toplevel(self)
-        win.title("MontrixBot — RSI Chart (demo 1.1)")
-        win.geometry("800x500")
-
-        panel = ChartPanel(win)
-        panel.pack(fill="both", expand=True)
-
-        try:
-            times, prices = self._load_chart_prices(max_points=300)
-            if times and prices:
-                panel.plot_series(times, prices)
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("RSI Chart", f"Не удалось построить график: {e}")
-
+        """Proxy: делегирует открытие RSI Chart контроллеру графиков."""
+        self.chart_controller.open_rsi_chart()
+        
     def _open_rsi_live_chart(self) -> None:
-        if ChartPanel is None:
-            messagebox.showwarning("LIVE Chart", "ChartPanel / matplotlib недоступны.")
-            return
-
-        win = tk.Toplevel(self)
-        win.title("MontrixBot — LIVE Chart (ticks=300)")
-        win.geometry("800x500")
-
-        panel = ChartPanel(win)
-        panel.pack(fill="both", expand=True)
-
-        def refresh() -> None:
-            if not win.winfo_exists():
-                return
-            try:
-                times, prices = self._load_chart_prices(max_points=300)
-                if times and prices:
-                    panel.plot_series(times, prices)
-            except Exception:
-                pass
-            win.after(500, refresh)
-
-        refresh()
+        """Proxy: делегирует открытие LIVE Chart контроллеру графиков."""
+        self.chart_controller.open_rsi_live_chart()
     
     def _cmd_open_signals(self) -> None:
         """Открыть окно с историей сигналов из runtime/signals.jsonl.
@@ -2641,198 +2110,16 @@ class App(tk.Tk):
             messagebox.showerror("Buy (SIM)", f"Buy failed: {e}")
     
     def _manual_close_sim_position(self, symbol: str, reason: str = "UI_CLOSE") -> None:
-        """Закрывает все позиции по symbol в AUTOSIM, считает PnL и пишет SELL в trades.jsonl."""
-        # получаем движок autosim
-        try:
-            sim = getattr(self, "_autosim", None)
-        except Exception:
-            sim = None
-        if sim is None:
-            return
-            
-        # берём engine, где реально лежат позиции AUTOSIM
-        try:
-            engine = getattr(sim, "engine", None)
-        except Exception:
-            engine = None
-        if engine is None:
+        """Delegate manual close of SIM positions to AutosimController."""
+        ctrl = getattr(self, "autosim_controller", None)
+        if ctrl is None:
             return
 
-        # нормализуем символ
         try:
-            sym_u = (symbol or "").upper()
+            ctrl.manual_close_sim_position(symbol=symbol, reason=reason)
         except Exception:
-            sym_u = symbol or ""
-
-        # собираем все открытые позиции по этому символу из engine.active_positions
-        positions = []
-        try:
-            for p in list(getattr(engine, "active_positions", []) or []):
-                try:
-                    if (p.get("symbol") or "").upper() == sym_u:
-                        positions.append(p)
-                except Exception:
-                    continue
-        except Exception:
-            positions = []
-
-        if not positions:
+            # не даём autosim-контроллеру ломать UI
             return
-            
-        try:
-            self._log(f"[AUTOSIM] manual_close: found {len(positions)} positions for {sym_u}")
-        except Exception:
-            pass
-
-        # получаем последнюю цену из UIAPI/state
-        last_price = None
-        try:
-            api = self._ensure_uiapi()
-            if api is not None and hasattr(api, "get_last_price"):
-                last_price = api.get_last_price(sym_u)
-        except Exception:
-            last_price = None
-
-        lp = None
-        # 1) пробуем цену из UIAPI
-        if last_price is not None:
-            try:
-                lp = float(last_price)
-            except Exception:
-                lp = None
-
-        # 2) если UIAPI ничего не знает — берём цену из позиции AUTOSIM
-        if lp is None or lp <= 0.0:
-            try:
-                first_pos = positions[0]
-                candidate = first_pos.get("current_price") or first_pos.get("entry_price")
-                if candidate is not None:
-                    lp = float(candidate)
-            except Exception:
-                lp = None
-
-        # 3) если после всех попыток цена всё ещё невалидна — выходим
-        if lp is None or lp <= 0.0:
-            try:
-                self._log(f"[AUTOSIM] manual_close: no valid last_price for {sym_u}, cancel")
-            except Exception:
-                pass
-            return
-
-        # закрываем все найденные позиции в AUTOSIM и сами считаем PnL для журнала
-        records = []
-        for pos in positions:
-            # безопасно достаём основные поля позиции
-            try:
-                side_pos = str(pos.get("side", "")).upper()
-                qty = float(pos.get("qty") or 0.0)
-                entry = float(pos.get("entry_price") or 0.0)
-            except Exception:
-                continue
-
-            if qty <= 0.0 or entry <= 0.0:
-                # всё равно пробуем закрыть позицию в движке, но в журнал не пишем
-                try:
-                    sim._close_position(pos, lp, reason=reason)
-                except Exception:
-                    pass
-                continue
-
-            # вызываем закрытие в движке AUTOSIM, чтобы он обновил equity / active_positions
-            try:
-                sim._close_position(pos, lp, reason=reason)
-            except Exception:
-                # даже если он ничего не вернул — журнал мы всё равно запишем
-                pass
-
-            # вычисляем сторону закрытия и PnL
-            if side_pos in ("SHORT", "SELL"):
-                close_side = "BUY"
-                pnl_cash = (entry - lp) * qty
-            else:
-                # считаем, что любая неявная позиция — LONG/BUY
-                close_side = "SELL"
-                pnl_cash = (lp - entry) * qty
-
-            notional = entry * qty
-            pnl_pct = (pnl_cash / notional * 100.0) if notional else 0.0
-
-            # оценка времени удержания из hold_days (если есть)
-            hold_seconds = None
-            try:
-                hold_days = float(pos.get("hold_days", 0.0) or 0.0)
-                hold_seconds = int(hold_days * 86400)
-            except Exception:
-                pass
-
-            rec = {
-                "type": "ORDER",
-                "mode": "SIM",
-                "symbol": pos.get("symbol"),
-                "side": close_side,
-                "qty": qty,
-                "price": lp,
-                "status": "FILLED",
-                "ts": int(time.time()),
-                "source": reason,
-                "pnl_cash": pnl_cash,
-                "pnl_pct": pnl_pct,
-            }
-            if hold_seconds is not None:
-                rec["hold_seconds"] = hold_seconds
-
-            records.append(rec)
-
-        if not records:
-            return
-
-        # пишем все SELL в журнал одной пачкой
-        try:
-            JOURNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with JOURNAL_FILE.open("a", encoding="utf-8") as f:
-                for rec in records:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        except Exception:
-            # не даём ошибкам журнала ломать UI
-            return
-
-        # после ручного закрытия руками обновляем snapshot для UI,
-        # чтобы Active position (SIM) и мини-equity обновились сразу
-        try:
-            active_now = list(getattr(engine, "active_positions", []) or [])
-
-            portfolio = {
-                "equity": float(getattr(engine, "equity", 0.0) or 0.0),
-                "cash": float(getattr(engine, "cash", 0.0) or 0.0),
-                "open_positions_count": len(active_now),
-            }
-
-            snapshot = {
-                "portfolio": portfolio,
-                "active": active_now,
-            }
-
-            # обновляем панель активных позиций
-            try:
-                self._update_active_from_sim(snapshot)
-            except Exception:
-                pass
-
-            # обновляем мини-equity бар
-            try:
-                self._update_equity_bar(snapshot)
-            except Exception:
-                pass
-
-            # перезаписываем sim_state.json для консистентности (атомарно)
-            try:
-                save_sim_state(snapshot)
-            except Exception:
-                pass
-
-        except Exception:
-            # любые ошибки здесь не должны ломать UI
-            pass
 
     def on_close_sim(self) -> None:
         """Close через UIAPI в SIM."""
