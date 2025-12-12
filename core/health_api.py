@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import os
 
 
+from . import runtime_sanity
+
+
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = ROOT / "runtime"
 DEFAULT_HEALTH_LOG = RUNTIME_DIR / "health.log"
@@ -138,3 +141,24 @@ def load_health_snapshot(
         "last_flags": last_flags,
         "last_ts_str": last_ts_str,
     }
+
+def get_runtime_sanity_report() -> Dict[str, Any]:
+    """
+    Обёртка над runtime_sanity.run_runtime_sanity_check().
+
+    Держим её в health_api, чтобы UI/health-слой мог получать
+    sanity-отчёт, не импортируя runtime_sanity напрямую.
+    """
+    try:
+        return runtime_sanity.run_runtime_sanity_check()
+    except Exception:
+        import logging
+
+        logger = logging.getLogger("montrix.health")
+        logger.exception("health_api: runtime sanity check failed")
+        return {
+            "ok": False,
+            "issues": ["runtime_sanity_failed"],
+            "warnings": [],
+            "summary": {},
+        }

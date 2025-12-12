@@ -50,6 +50,7 @@ from ui.controllers.autosim_controller import AutosimController
 from ui.services.snapshot_service import SnapshotService
 from ui.services.ui_updater import UIRefreshService
 from ui.services.tick_updater import TickUpdater
+from ui.events.subscribers import install_default_ui_subscribers
 
 
 from tools.formatting import fmt_price, fmt_pnl
@@ -272,6 +273,9 @@ class App(tk.Tk):
         # TickUpdater — ранний TickService / Update Router для tick-снапшотов ядра.
         # Не имеет собственного цикла, живёт внутри SnapshotService/UIRefreshService.
         self.tick_updater = TickUpdater(self)
+
+        # STEP1.3.4_pre3: подписываем UI-потребителей на EventBus (без дублей)
+        install_default_ui_subscribers(self)
 
         # UI-флаг для Dry-Run бейджа (пока влияет только на внешний вид и логи)
         self.dry_run_ui_on: bool = True
@@ -2105,6 +2109,9 @@ class App(tk.Tk):
             self._log(f"[UI] manual BUY SIM {sym} qty={qty} via UIAPI")
             res = api.buy_market(sym, qty)
             self._log(f"[UI] ui bridge BUY SIM {sym} qty={qty} -> {res}")
+
+            # FORCE: сразу подтянуть снапшот ядра -> TickUpdater -> EventBus -> UI panels
+            self._refresh_from_core_snapshot()
         except Exception as e:  # noqa: BLE001
             self._log(f"[ERROR] ui bridge BUY SIM failed: {e!r}")
             messagebox.showerror("Buy (SIM)", f"Buy failed: {e}")
@@ -2142,6 +2149,9 @@ class App(tk.Tk):
             # затем дергаем UIAPI, чтобы TPSL/EXECUTOR тоже знали о закрытии
             api.close_position(sym, reason="UI_close")
             self._log(f"[UI] ui bridge CLOSE SIM {sym}")
+
+            # FORCE: сразу подтянуть снапшот ядра -> TickUpdater -> EventBus -> UI panels
+            self._refresh_from_core_snapshot()
         except Exception as e:  # noqa: BLE001
             self._log(f"[ERROR] ui bridge CLOSE SIM failed: {e!r}")
             messagebox.showerror("Close (SIM)", f"Close failed: {e}")
@@ -2236,6 +2246,9 @@ class App(tk.Tk):
             # 2) затем уже дергаем UIAPI.panic для закрытия позиции через TPSL
             api.panic(sym)
             self._log(f"[UI] ui bridge PANIC {sym}")
+
+            # FORCE: сразу подтянуть снапшот ядра -> TickUpdater -> EventBus -> UI panels
+            self._refresh_from_core_snapshot()
 
             # 3) и, наконец, включаем глобальный PANIC-KILL:
             #    SAFE_MODE + отключение автолоопа + panic-флаг

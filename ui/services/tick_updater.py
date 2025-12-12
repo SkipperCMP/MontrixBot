@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from typing import Any
+import time
+
+from ui.events.bus import event_bus
+from ui.events.types import Event, EVT_SNAPSHOT
 
 
 class TickUpdater:
@@ -49,21 +53,19 @@ class TickUpdater:
 
         self._last_version = version
 
-        # --- 1) уведомляем контроллер графиков (если он умеет это принимать)
+        # --- публикуем EVT_SNAPSHOT в EventBus (Unified Event System, STEP1.3.4)
         try:
-            chart_ctrl = getattr(app, "chart_controller", None)
-            if chart_ctrl is not None and hasattr(chart_ctrl, "update_from_snapshot"):
-                chart_ctrl.update_from_snapshot(snapshot)
+            event = Event(
+                type=EVT_SNAPSHOT,
+                ts=time.time(),
+                source="TickUpdater",
+                payload={"snapshot": snapshot},
+            )
+            event_bus.publish(event)
         except Exception:
-            # ошибки графиков не должны ломать остальной UI
+            # проблемы в EventBus не должны ломать основной tick-пайплайн
             pass
 
-        # --- 2) обновление прайса / мини-тикового блока на topbar, если есть метод
-        try:
-            if hasattr(app, "_update_price_from_snapshot"):
-                app._update_price_from_snapshot(snapshot)
-        except Exception:
-            pass
 
         # сюда позже можно добавить:
         # - обновление inline heatmap по ticks
