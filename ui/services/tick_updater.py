@@ -26,6 +26,7 @@ class TickUpdater:
     def __init__(self, app: Any) -> None:
         self.app = app
         self._last_version: str | int | None = None
+        self._last_snapshot_ts: float | None = None  # STEP1.4.1: UI heartbeat
 
     # ------------------------------------------------------------------ API --
 
@@ -53,13 +54,27 @@ class TickUpdater:
 
         self._last_version = version
 
-        # --- публикуем EVT_SNAPSHOT в EventBus (Unified Event System, STEP1.3.4)
+        # --- публикуем EVT_SNAPSHOT в EventBus (Unified Event System)
+        # STEP1.4.1: добавляем heartbeat-метрику lag_s (время между снапшотами)
         try:
+            now = time.time()
+            if self._last_snapshot_ts is None:
+                lag_s = 0.0
+            else:
+                lag_s = max(0.0, now - self._last_snapshot_ts)
+            self._last_snapshot_ts = now
+
             event = Event(
                 type=EVT_SNAPSHOT,
-                ts=time.time(),
+                ts=now,
                 source="TickUpdater",
-                payload={"snapshot": snapshot},
+                payload={
+                    "snapshot": snapshot,
+                    "meta": {
+                        "lag_s": lag_s,
+                        "ts": now,
+                    },
+                },
             )
             event_bus.publish(event)
         except Exception:

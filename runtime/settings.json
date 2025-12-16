@@ -1,10 +1,18 @@
 {
   "panic": {
-    "active": true,
+    "active": false,
     "reason": "UI_PANIC_ADAUSDT",
-    "since": 1765471683.560195
+    "since": 1765787625.3288407
   },
   "tpsl_autoloop": {
     "enabled": false
+  },
+  "history_retention": {
+    "trades_jsonl": {
+      "max_lines": 5000
+    },
+    "health_log": {
+      "max_lines": 2000
+    }
   }
 }

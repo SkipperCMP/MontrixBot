@@ -58,11 +58,38 @@ class OrderResult:
 
 
 class OrderExecutor:
-    def __init__(self, mode: str = "SIM", state: Optional[object] = None, journal_path: str = JOURNAL_PATH_DEFAULT):
+    def __init__(
+        self,
+        mode: str = "SIM",
+        state: Optional[object] = None,
+        journal_path: str = JOURNAL_PATH_DEFAULT,
+    ):
         self.mode = mode
         self.state = state
         # trades.jsonl (совместимо с TPSLManager по умолчанию)
         self.journal_path = journal_path
+
+    def set_mode(self, mode: str) -> None:
+        """
+        STEP 1.4.7: UI may request mode switch, but REAL is gated by SAFE/PANIC.
+        Core-owned safety: if unsafe -> force SIM.
+        """
+        m = (mode or "SIM").upper()
+        if m not in ("SIM", "REAL"):
+            m = "SIM"
+
+        if m == "REAL":
+            try:
+                from core.panic_tools import is_panic_active
+                from tools.safe_lock import is_safe_on
+                if bool(is_panic_active()) or bool(is_safe_on()):
+                    self.mode = "SIM"
+                    return
+            except Exception:
+                self.mode = "SIM"
+                return
+
+        self.mode = m
 
     # -------- helpers --------
     def _last_price(self, symbol: str) -> float:

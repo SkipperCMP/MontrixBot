@@ -102,6 +102,26 @@ def place_order_real(
     safe_code: Optional[str] = None,
     **kwargs,
 ):
+    # --- GLOBAL REAL GATE (STEP1.4.8) ---
+    from tools.safe_lock import is_safe_on
+    from core.panic_tools import is_panic_active
+    from core.runtime_state import load_runtime_state
+
+    if is_safe_on():
+        raise PermissionError("REAL blocked: SAFE_MODE active")
+
+    if is_panic_active():
+        raise PermissionError("REAL blocked: PANIC active")
+
+    st = load_runtime_state() or {}
+    meta = st.get("meta") or {}
+
+    if meta.get("trading_gate") != "ALLOW":
+        raise PermissionError("REAL blocked: trading_gate != ALLOW")
+
+    if meta.get("strategy_state") == "PAUSED":
+        raise PermissionError("REAL blocked: strategy paused")
+
     """Place a REAL order using python-binance with SAFE + filter guards.
 
     This helper performs:

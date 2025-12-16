@@ -21,9 +21,12 @@ def apply_neutral_dark(style: ttk.Style):
     style.configure("TLabelframe.Label", background=bg, foreground=fg)
     style.configure("TLabel", background=bg, foreground=fg)
     style.configure("TButton", background=card, foreground=fg, relief="flat", padding=6)
-    style.map("TButton",
-              background=[("active", "#1f2530")],
-              relief=[("pressed", "sunken")])
+    style.map(
+        "TButton",
+        background=[("disabled", "#151a22"), ("active", "#1f2530")],
+        foreground=[("disabled", "#5a6475")],
+        relief=[("pressed", "sunken")],
+    )
     style.configure("TCombobox", fieldbackground=card, background=card, foreground=fg, arrowcolor=fg)
     style.map("TCombobox", fieldbackground=[("readonly", card)])
     style.configure("TEntry", fieldbackground=card, insertcolor=fg, foreground=fg)

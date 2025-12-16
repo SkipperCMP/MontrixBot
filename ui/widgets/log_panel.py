@@ -86,6 +86,15 @@ def build_log_ui(app: Any, StatusBar: Any) -> None:
     except Exception:
         app.mini_equity = None
 
+    # --- HealthPanel (snapshot-driven, UI-only) ---
+    app.health_panel = None
+    try:
+        # запуск как пакет
+        from ..health_widget import HealthPanel  # type: ignore
+    except Exception:
+        # запуск как скрипт
+        from health_widget import HealthPanel  # type: ignore
+
     # Сам статус-бар — самый нижний элемент
     app.status_bar = None
     if StatusBar is not None:
@@ -96,3 +105,10 @@ def build_log_ui(app: Any, StatusBar: Any) -> None:
         except Exception:
             # Не даём упасть всему UI из-за статуса
             app.status_bar = None
+
+    try:
+        hp = HealthPanel(frm)
+        hp.pack(fill="x", side="bottom")  # можно fill="both", если хочешь таблицу повыше
+        app.health_panel = hp
+    except Exception:
+        app.health_panel = None

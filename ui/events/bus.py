@@ -9,6 +9,11 @@ from ui.events.types import Event
 
 Callback = Callable[[Event], None]
 
+# UI Unified EventBus
+# Единственный допустимый EventBus для UI слоя (STEP1.3.4)
+UI_EVENT_BUS = True
+
+
 
 class EventBus:
     """Простой in-process EventBus для UI.

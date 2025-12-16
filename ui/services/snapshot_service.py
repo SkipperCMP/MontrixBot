@@ -43,26 +43,11 @@ class SnapshotService:
         except Exception:
             return
 
-        # 2) статус-бар и mini-equity (если доступны в App)
-        try:
-            app._update_status_bar(snapshot)
-        except Exception:
-            pass
-
-        # 3) TickService / Update Router — tick-чувствительные элементы UI
+        # 2) TickService / Update Router — ЕДИНЫЙ вход снапшота в UI (EventBus)
         try:
             tu = getattr(app, "tick_updater", None)
             if tu is not None and hasattr(tu, "update_from_snapshot"):
                 tu.update_from_snapshot(snapshot)
         except Exception:
             # любые проблемы тик-сервиса не должны ломать основной UI
-            pass
-
-        # 4) журнал сделок (если зарегистрирован)
-        try:
-            dj = getattr(app, "_deals_journal_widget", None)
-            if dj is not None and hasattr(dj, "update_from_snapshot"):
-                dj.update_from_snapshot(snapshot)
-        except Exception:
-            # ошибки обновления журнала не должны ломать основной UI
             pass

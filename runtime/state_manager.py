@@ -133,6 +133,12 @@ class StateManager:
                 except OSError:
                     pass
 
+    # NOTE (STEP1.4.4 debt closure):
+    # state.json is NOT rotated/truncated by design.
+    # Retention is applied to append-only logs (jsonl/log) only.
+    # If we ever introduce state history snapshots, retention must be implemented
+    # as a separate log file (e.g. state_history.jsonl) and rotated there.
+
     # --------------------------------------------------------------------- #
     # ПУБЛИЧНЫЙ API
     # --------------------------------------------------------------------- #

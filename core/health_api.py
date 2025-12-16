@@ -7,7 +7,7 @@ import os
 
 
 from . import runtime_sanity
-
+from .history_retention import apply_retention_for_key
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = ROOT / "runtime"
@@ -99,6 +99,13 @@ def load_health_snapshot(
     try:
         with path.open("r", encoding="utf-8") as f:
             lines = f.readlines()[-max_lines:]
+
+        # STEP1.4.4: log retention (best-effort). Trim file itself, not just UI slice.
+        try:
+            apply_retention_for_key(str(path), "health_log")
+        except Exception:
+            pass
+
     except FileNotFoundError:
         # health.log ещё не создан — возвращаем пустую структуру
         return {

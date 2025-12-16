@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Literal, Iterable
 
 from core.executor import OrderExecutor
+from core.history_retention import apply_retention_for_key
 
 Side = Literal["LONG","SHORT"]
 
@@ -45,6 +46,9 @@ class TPSLManager:
             event["ts"] = event.get("ts") or time.time()
             with open(self.journal_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+            # STEP1.4.4: log retention (best-effort)
+            apply_retention_for_key(self.journal_path, "trades_jsonl")
         except Exception:
             pass
 

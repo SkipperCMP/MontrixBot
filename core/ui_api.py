@@ -13,7 +13,6 @@ from core.events import StateSnapshot
 from core.runtime_state import load_runtime_state, reset_sim_state
 from core.tpsl_settings_api import get_tpsl_settings, update_tpsl_settings
 
-
 @dataclass
 class UIStatus:
     mode: str
@@ -144,6 +143,31 @@ class UIAPI:
             symbols=self.symbols,
             active_positions=positions,
         )
+
+    # ==============================
+    #   TIME UTILS (STEP1.4.3)
+    # ==============================
+    def _normalize_ts(self, ts: Optional[float]) -> float:
+        """
+        Привести timestamp к секундам (float) на стороне UI.
+        """
+        if ts is None:
+            import time as _time
+            return _time.time()
+        try:
+            v = float(ts)
+        except Exception:
+            import time as _time
+            return _time.time()
+
+        if v >= 1e12:
+            v = v / 1000.0
+
+        if v <= 0:
+            import time as _time
+            return _time.time()
+
+        return v
         
     # ==============================
     #   ЖУРНАЛЫ (сигналы/сделки)
@@ -171,6 +195,41 @@ class UIAPI:
     def append_recent_signal(self, row: Dict[str, Any]) -> None:
         """Alias for add_recent_signal (compat with existing UI code)."""
         self.add_recent_signal(row)
+
+    def persist_signal_record(self, rec: dict) -> None:
+        """
+        Core-owned persistence for signals history.
+        UI should NOT write runtime/signals.jsonl directly.
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            root = Path(__file__).resolve().parents[1]
+            path = root / "runtime" / "signals.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            # persistence must never crash UI/core loop
+            pass
+
+    def get_recent_signals_tail(self, limit: int = 500) -> list[dict]:
+        """
+        Prefer in-memory buffer; UI uses this for Signals window.
+        """
+        try:
+            buf = getattr(self, "recent_signals", None)
+            if not buf:
+                return []
+            # buf can be list or deque
+            items = list(buf)
+            if limit and len(items) > limit:
+                items = items[-limit:]
+            # return newest-first for UI convenience
+            return list(reversed(items))
+        except Exception:
+            return []
 
     def append_recent_trade(self, row: Dict[str, Any]) -> None:
         """Alias for add_recent_trade (compat with existing UI code)."""
@@ -232,6 +291,34 @@ class UIAPI:
         ticks = core_snap.get("ticks") or {}
         version = core_snap.get("version", 0)
 
+        # STEP1.4.2: core delay detector flags from StateEngine.snapshot()
+        core_lag_s: Optional[float] = None
+        core_stall: Optional[bool] = None
+
+        # STEP1.4.3: time integrity flags from StateEngine.snapshot()
+        core_time_backwards: Optional[bool] = None
+        core_time_backwards_delta_s: Optional[float] = None
+        try:
+            v = core_snap.get("core_time_backwards")
+            core_time_backwards = bool(v) if v is not None else None
+        except Exception:
+            core_time_backwards = None
+        try:
+            v = core_snap.get("core_time_backwards_delta_s")
+            core_time_backwards_delta_s = float(v) if v is not None else None
+        except Exception:
+            core_time_backwards_delta_s = None
+        try:
+            v = core_snap.get("core_lag_s")
+            core_lag_s = float(v) if v is not None else None
+        except Exception:
+            core_lag_s = None
+        try:
+            v = core_snap.get("core_stall")
+            core_stall = bool(v) if v is not None else None
+        except Exception:
+            core_stall = None
+
         # --- 2) Позиции TPSL ---
         positions: Dict[str, dict] = {}
         equity: Optional[float] = None
@@ -270,6 +357,29 @@ class UIAPI:
             except Exception:
                 equity = None
 
+        # fallback (SIM): equity + portfolio из runtime_state["sim"] (sim_state.json)
+        sim_portfolio: Optional[Dict[str, Any]] = None
+        if str(self._ui_mode).upper() == "SIM":
+            try:
+                rt = load_runtime_state()
+                sim = rt.get("sim") if isinstance(rt, dict) else None
+                if isinstance(sim, dict):
+                    # equity
+                    eq_raw = sim.get("equity")
+                    if eq_raw is None:
+                        pf = sim.get("portfolio")
+                        if isinstance(pf, dict):
+                            eq_raw = pf.get("equity")
+                    if equity is None and eq_raw is not None:
+                        equity = float(eq_raw)
+
+                    # portfolio (для pnl / open fallbacks)
+                    pf = sim.get("portfolio")
+                    if isinstance(pf, dict):
+                        sim_portfolio = pf
+            except Exception:
+                sim_portfolio = None
+
         # --- 3) Advisor snapshot ---
         advisor = self._advisor_snapshot or {}
         trend = advisor.get("trend")
@@ -301,19 +411,27 @@ class UIAPI:
         if pnl_total_pct is None:
             pnl_total_pct = _safe_float(getattr(self.executor, "pnl_total_pct", None))
 
+        # fallback (SIM): pnl_% из sim_state.json
+        if str(self._ui_mode).upper() == "SIM" and sim_portfolio is not None:
+            if pnl_day_pct is None:
+                pnl_day_pct = _safe_float(sim_portfolio.get("pnl_day_pct"))
+            if pnl_total_pct is None:
+                pnl_total_pct = _safe_float(sim_portfolio.get("pnl_total_pct"))
+
         try:
             open_positions_count = len(positions)
         except Exception:
             open_positions_count = 0
+        # fallback (SIM): open_positions_count из sim_state.json
+        if str(self._ui_mode).upper() == "SIM" and sim_portfolio is not None:
+            if not open_positions_count:
+                try:
+                    v = sim_portfolio.get("open_positions_count")
+                    if v is not None:
+                        open_positions_count = int(v)
+                except Exception:
+                    pass
 
-        portfolio: Dict[str, Any] = {
-            "equity": equity,
-            "pnl_day_pct": pnl_day_pct,
-            "pnl_total_pct": pnl_total_pct,
-            "open_positions_count": open_positions_count,
-            "open_pnl_abs": open_pnl_abs,
-            "open_pnl_pct": open_pnl_pct,
-        }
 
         # --- 4.1) Open PnL по открытым позициям (best-effort) ---
         open_pnl_abs: Optional[float] = None
@@ -360,11 +478,42 @@ class UIAPI:
             open_pnl_abs = None
             open_pnl_pct = None
 
+        portfolio: Dict[str, Any] = {
+            "equity": equity,
+            "pnl_day_pct": pnl_day_pct,
+            "pnl_total_pct": pnl_total_pct,
+            "open_positions_count": open_positions_count,
+            "open_pnl_abs": open_pnl_abs,
+            "open_pnl_pct": open_pnl_pct,
+        }
+
         # --- 5) Health-блок ---
         health: Dict[str, Any] = {
             "status": "OK",
             "messages": [],
         }
+
+        # STEP1.4.2: core stall indicator (no actions here)
+        if core_lag_s is not None:
+            try:
+                health["core_lag_s"] = core_lag_s
+            except Exception:
+                pass
+        if core_stall is not None:
+            try:
+                health["core_stall"] = core_stall
+                if core_stall:
+                    health["status"] = "WARN"
+                    try:
+                        msgs = health.get("messages")
+                        if not isinstance(msgs, list):
+                            msgs = []
+                            health["messages"] = msgs
+                        msgs.append("CORE_STALL")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         core_health = core_snap.get("health")
         if isinstance(core_health, dict):
@@ -399,6 +548,11 @@ class UIAPI:
             "trend": trend,
             "portfolio": portfolio,
             "health": health,
+            "core_lag_s": core_lag_s,
+            "core_stall": core_stall,       
+            "core_time_backwards": core_time_backwards,
+            "core_time_backwards_delta_s": core_time_backwards_delta_s,            
+            "safe_mode": core_snap.get("safe_mode") or {},
             "ts": int(time.time() * 1000),
             # NEW: recent-журналы для UI
             "signals_recent": self.get_recent_signals(),
@@ -530,7 +684,8 @@ class UIAPI:
             symbol_u = "UNKNOWN"
 
         try:
-            state.upsert_ticker(symbol_u, price, ts=ts)
+            ts_n = self._normalize_ts(ts)
+            state.upsert_ticker(symbol_u, price, ts=ts_n)
         except Exception:
             return 0
 
@@ -702,3 +857,23 @@ class UIAPI:
                 self.tpsl.close(symbol.upper(), "UI_panic")
             except Exception:
                 pass
+
+    def real_buy_market(self, symbol: str, quantity: float):
+        from core.orders_real import place_order_real
+        return place_order_real(
+            symbol=symbol,
+            side="BUY",
+            type_="MARKET",
+            quantity=quantity,
+            safe_code=None,
+        )
+
+    def real_sell_market(self, symbol: str, quantity: float):
+        from core.orders_real import place_order_real
+        return place_order_real(
+            symbol=symbol,
+            side="SELL",
+            type_="MARKET",
+            quantity=quantity,
+            safe_code=None,
+        )
