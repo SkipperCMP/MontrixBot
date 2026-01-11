@@ -1,0 +1,74 @@
+{
+  "metrics": {
+    "events_total": 470,
+    "incidents_total": 0,
+    "signals_exists": true,
+    "ts_zero": 0,
+    "ts_zero_ratio": 0.0,
+    "ts_inversions": 0,
+    "ts_inversion_ratio": 0.0,
+    "checkpoints_total": 2
+  },
+  "findings": [
+    {
+      "severity": "OK",
+      "code": "READINESS_SIGNALS_SOURCE_PRESENT",
+      "message": "Signals source present or replay produced events.",
+      "metrics": {
+        "signals_exists": true,
+        "events_total": 470
+      }
+    },
+    {
+      "severity": "OK",
+      "code": "READINESS_TS_ZERO_NONE",
+      "message": "No zero/unknown timestamps detected.",
+      "metrics": {
+        "ts_zero": 0,
+        "events_total": 470,
+        "ts_zero_ratio": 0.0
+      }
+    },
+    {
+      "severity": "OK",
+      "code": "READINESS_TS_INVERSIONS_NONE",
+      "message": "No timestamp inversions detected.",
+      "metrics": {
+        "inversions": 0,
+        "events_total": 470,
+        "inv_ratio": 0.0
+      }
+    },
+    {
+      "severity": "OK",
+      "code": "READINESS_INCIDENTS_SUMMARY",
+      "message": "Incidents distribution (diagnostic only).",
+      "metrics": {
+        "incidents_total": 0,
+        "levels": {}
+      }
+    },
+    {
+      "severity": "OK",
+      "code": "READINESS_CHECKPOINTS_PRESENT",
+      "message": "Replay checkpoints present.",
+      "metrics": {
+        "checkpoints_total": 2
+      }
+    },
+    {
+      "severity": "INFO",
+      "code": "READINESS_SCHEMA_MISSING_IN_EVENTS",
+      "message": "Some events are missing _schema (expected for historical records).",
+      "metrics": {
+        "schema_missing": 451,
+        "events_total": 470,
+        "schema_missing_ratio": 0.9595744680851064
+      }
+    }
+  ],
+  "_schema": {
+    "name": "runtime.readiness_last",
+    "version": 1
+  }
+}

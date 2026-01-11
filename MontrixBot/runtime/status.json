@@ -1,0 +1,47 @@
+{
+  "fsm": "TRADING_ACTIVE",
+  "mode": "MANUAL_ONLY",
+  "policy_hard_stop_active": false,
+  "why_not": [
+    "MODE_MANUAL_ONLY"
+  ],
+  "gate": {
+    "decision": "VETO",
+    "reasons": [
+      "MODE_MANUAL_ONLY"
+    ],
+    "evidence": [
+      "status:ts=1768162978",
+      "policy:file=runtime/autonomy_policy.json",
+      "fsm:file=runtime/trading_fsm.json",
+      "policy:mode=MANUAL_ONLY",
+      "policy:hard_stop_active=false",
+      "fsm:state=TRADING_ACTIVE",
+      "fsm:pause_reasons=-",
+      "status:why_not=MODE_MANUAL_ONLY",
+      "position:open=0"
+    ]
+  },
+  "ts": 1768162978,
+  "ts_utc": "2026-01-11T20:22:58.244581+00:00",
+  "source": "status_service",
+  "gate_last": {
+    "decision": "VETO",
+    "reasons": [
+      "MODE_MANUAL_ONLY"
+    ],
+    "evidence": [
+      "status:ts=1768162978",
+      "policy:file=runtime/autonomy_policy.json",
+      "fsm:file=runtime/trading_fsm.json",
+      "policy:mode=MANUAL_ONLY",
+      "policy:hard_stop_active=false",
+      "fsm:state=TRADING_ACTIVE",
+      "fsm:pause_reasons=-",
+      "status:why_not=MODE_MANUAL_ONLY",
+      "position:open=0"
+    ],
+    "source": "gate_engine",
+    "ts_utc": "2026-01-11T20:22:58.244581+00:00"
+  }
+}

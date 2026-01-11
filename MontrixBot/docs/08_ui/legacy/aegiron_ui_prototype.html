@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Crypto Bot — Финальный интерфейс (Прототип)</title>
+<style>
+  :root{
+    --bg:#0e1116;--panel:#161a22;--panel2:#1b2130;--text:#e6e6e6;--muted:#9aa4b2;--accent:#5cc8ff;--accent2:#7cffb7;--danger:#ff5c7a;--warn:#ffd25c;
+    --ok:#4ad295;--border:#2a3140;--shadow:0 8px 28px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Arial}
+  header{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:linear-gradient(180deg,#161b22,#11151c);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+  header .title{display:flex;gap:12px;align-items:center}
+  .pill{padding:3px 8px;border:1px solid var(--border);border-radius:999px;color:var(--muted);background:rgba(255,255,255,.02)}
+  .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:10px;cursor:pointer;transition:.15s;box-shadow:var(--shadow)}
+  .btn:hover{transform:translateY(-1px);background:#212838}
+  .btn.primary{background:linear-gradient(180deg,#2b73ff,#255dff);border-color:#255dff}
+  .btn.danger{background:linear-gradient(180deg,#ff3b6b,#ff205a);border-color:#ff3b6b}
+  .btn.ok{background:linear-gradient(180deg,#26c281,#1e9b67);border-color:#26c281}
+  .layout{display:grid;grid-template-columns:240px 1fr;gap:14px;padding:14px}
+  nav{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:8px;position:sticky;top:64px;height:calc(100dvh - 84px);overflow:auto}
+  nav .item{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;color:var(--text);cursor:pointer;margin:4px 0;border:1px solid transparent}
+  nav .item:hover{background:#1a2130;border-color:var(--border)}
+  nav .item.active{background:#202738;border-color:#2c3550;box-shadow:var(--shadow)}
+  nav .item .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+  nav .item.active .dot{background:var(--accent)}
+  main{display:flex;flex-direction:column;gap:14px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px;box-shadow:var(--shadow)}
+  .panel h2{margin:0 0 10px 0;font-size:16px;color:#cfe3ff}
+  .grid{display:grid;gap:12px}
+  .grid.cols-2{grid-template-columns:1fr 1fr}
+  .grid.cols-3{grid-template-columns:repeat(3,1fr)}
+  .grid.cols-4{grid-template-columns:repeat(4,1fr)}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .kv{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;min-width:160px}
+  .kv .k{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  .kv .v{font-size:18px}
+  .switch{position:relative;width:54px;height:28px;background:#2a2f3d;border-radius:999px;border:1px solid var(--border);cursor:pointer;flex:0 0 auto}
+  .switch input{display:none}
+  .switch span{position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#8b93a6;transition:.2s}
+  .switch input:checked + span{left:28px;background:#72f1b8;box-shadow:0 0 0 3px rgba(114,241,184,.2)}
+  .card{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+  .card .title{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .muted{color:var(--muted)}
+  .slider{width:100%}
+  .tag{font-size:12px;color:#9cc7ff;background:#142032;border:1px solid #2a3e66;padding:3px 6px;border-radius:999px}
+  table{width:100%;border-collapse:separate;border-spacing:0 6px}
+  th,td{text-align:left;padding:10px}
+  thead th{color:#b9c6d8;font-weight:600}
+  tbody tr{background:var(--panel2);border:1px solid var(--border)}
+  tbody tr td{border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+  tbody tr td:first-child{border-left:1px solid var(--border);border-top-left-radius:10px;border-bottom-left-radius:10px}
+  tbody tr td:last-child{border-right:1px solid var(--border);border-top-right-radius:10px;border-bottom-right-radius:10px}
+  .pill-status{padding:3px 8px;border-radius:8px;border:1px solid var(--border);background:#1d2432;color:#b9c6d8}
+  canvas{width:100%;height:180px;background:#0f131a;border:1px solid var(--border);border-radius:12px}
+  .hint{font-size:12px;color:#aab6c8}
+  .footer{display:flex;justify-content:space-between;align-items:center;color:var(--muted);padding:6px 0 0 0}
+  .kbd{padding:2px 6px;border:1px solid var(--border);border-radius:6px;background:#131822;color:#a9b6c9}
+  .danger-text{color:var(--danger)}
+  .ok-text{color:var(--ok)}
+  .warn-text{color:var(--warn)}
+  .input, select{background:#111725;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px}
+  .spacer{flex:1}
+</style>
+</head>
+<body>
+<header>
+  <div class="title">
+    <div style="width:12px;height:12px;border-radius:50%;background:var(--accent2);box-shadow:0 0 16px var(--accent2)"></div>
+    <strong>Aegiron</strong><div class='muted' style='font-size:12px'>AI Crypto Trading Bot with Risk Shield</div>
+    <span class="pill">v1.0 • Simulator</span>
+    <span class="pill">API: Binance (Read-Only)</span>
+  </div>
+  <div class="row">
+    <button class="btn ok" id="btnStart">Старт</button>
+    <button class="btn danger" id="btnKill">Kill‑Switch</button>
+    <button class="btn" id="btnSave">Сохранить</button>
+  </div>
+</header>
+
+<div class="layout">
+  <nav id="menu"></nav>
+  <main id="content"></main>
+</div>
+
+<script>
+// ------- Simple SPA Navigation --------
+const pages = [
+  {id:'dashboard', label:'Панель', dot:'#7cffb7'},
+  {id:'strategies', label:'Стратегии', dot:'#5cc8ff'},
+  {id:'positions', label:'Позиции', dot:'#ffd25c'},
+  {id:'chart', label:'График', dot:'#7ab3ff'},
+  {id:'radar', label:'Радар пампов', dot:'#ff7cc2'},
+  {id:'orders', label:'Ордеры', dot:'#b28cff'},
+  {id:'allocator', label:'Перераспределение', dot:'#7cffe3'},
+  {id:'limits', label:'Лимиты и защита', dot:'#ff5c7a'},
+  {id:'settings', label:'Настройки', dot:'#9aa4b2'},
+  {id:'logs', label:'Логи', dot:'#e6e6e6'},
+  {id:'help', label:'Справка', dot:'#cfe3ff'}
+];
+
+const menu = document.getElementById('menu');
+const content = document.getElementById('content');
+
+function renderMenu(active='dashboard'){
+  menu.innerHTML = '';
+  pages.forEach(p=>{
+    const item = document.createElement('div');
+    item.className = 'item'+(p.id===active?' active':'');
+    item.innerHTML = `<div class="dot" style="background:${p.dot}"></div><div>${p.label}</div>`;
+    item.onclick = ()=>{ renderMenu(p.id); renderPage(p.id); };
+    menu.appendChild(item);
+  });
+}
+
+function fmt(n){ return (Math.round(n*100)/100).toFixed(2); }
+
+// ------- State -------
+const state = {
+  running:false,
+  kill:false,
+  strategies:{
+    anchors:true,  // 2 якоря + 1 ракета
+    growth:true,   // Рост с усреднением
+    conservative:true,
+    pump:true      // Радар пампов (как стратегия)
+  },
+  weights:{ conservative:40, growth:30, anchors:20, pump:10 },
+  limits:{ dailyLoss:5, maxLosingTrades:3, maxRiskPerTrade:1.5 },
+  portfolioCap:{ minPos:1, maxPos:10, reserve:15 },
+  radar:{ th1:5, th15:15, th60:30, minVolUSD:50000 },
+  log:[]
+};
+
+function log(msg){ 
+  const t = new Date().toLocaleTimeString(); 
+  state.log.unshift(`[${t}] ${msg}`);
+  if(state.log.length>200) state.log.pop();
+}
+
+function normalizeWeights(){
+  // Keep weights sum to 100
+  const keys = Object.keys(state.weights);
+  let total = keys.reduce((s,k)=> s+state.weights[k],0);
+  if(total===100) return;
+  const factor = 100/total;
+  keys.forEach(k=> state.weights[k] = Math.max(0, Math.min(100, state.weights[k]*factor)));
+}
+
+// ------- Pages -------
+function pageDashboard(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="grid cols-3">
+      <div class="panel">
+        <h2>Статус</h2>
+        <div class="grid cols-2">
+          <div class="kv"><div class="k">Режим</div><div class="v">${state.running&&!state.kill?'Работает':'Остановлен'}</div></div>
+          <div class="kv"><div class="k">Кольцо защиты</div><div class="v ${state.kill?'danger-text':'ok-text'}">${state.kill?'Активирован Kill‑Switch':'Норма'}</div></div>
+          <div class="kv"><div class="k">Активные стратегии</div><div class="v">${Object.entries(state.strategies).filter(([,v])=>v).length} / 4</div></div>
+          <div class="kv"><div class="k">Резерв</div><div class="v">${fmt(state.portfolioCap.reserve)}%</div></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Доходность (демо)</h2>
+        <canvas id="eq"></canvas>
+        <div class="hint">График симулируется для прототипа.</div>
+      </div>
+      <div class="panel">
+        <h2>Сегодня</h2>
+        <div class="grid">
+          <div class="kv"><div class="k">Сделок</div><div class="v">3</div></div>
+          <div class="kv"><div class="k">PnL</div><div class="v ok-text">+1.42%</div></div>
+          <div class="kv"><div class="k">Drawdown</div><div class="v warn-text">-0.8%</div></div>
+          <div class="kv"><div class="k">Алерты</div><div class="v">2 (пампы)</div></div>
+        </div>
+      </div>
+    </div>
+
+      <div class="panel">
+        <h2>Последний триггер защиты</h2>
+        <div id="lastGuard" class="hint">Пока без событий.</div>
+      </div>
+
+    <div class="panel">
+      <h2>Вес стратегий</h2>
+      <div id="weights"></div>
+      <div class="footer">
+        <span class="hint">Сумма весов всегда нормируется к 100%.</span>
+        <div class="spacer"></div>
+        <button class="btn" id="autoRebalance">Ребаланс</button>
+      </div>
+    </div>
+  `;
+  setTimeout(()=>{
+    drawEq();
+    renderWeights(dom.querySelector('#weights'));
+    dom.querySelector('#autoRebalance').onclick=()=>{ normalizeWeights(); renderPage('dashboard'); log('Ручной ребаланс весов'); };
+  },0);
+  return dom;
+}
+
+function renderWeights(container){
+  container.innerHTML='';
+  Object.entries(state.weights).forEach(([k,v])=>{
+    const label = {conservative:'Консервативная',growth:'Рост с усреднением',anchors:'2 якоря + 1 ракета',pump:'Радар пампов'}[k];
+    const row = document.createElement('div');
+    row.className='row';
+    row.style.margin='8px 0';
+    row.innerHTML = `<div style="width:200px">${label}</div>
+    <input class="slider" type="range" min="0" max="100" step="1" value="${v}" />
+    <div style="width:56px;text-align:right">${fmt(v)}%</div>`;
+    const slider = row.querySelector('input');
+    slider.oninput=()=>{
+      state.weights[k]=parseFloat(slider.value);
+      normalizeWeights();
+      renderPage('dashboard');
+    };
+    container.appendChild(row);
+  });
+}
+
+function pageStrategies(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="grid cols-2">
+      ${strategyCard('anchors','2 якоря + 1 ракета','Сбалансированный рост при умеренном риске',['волатильность','ликвидность','корреляция'])}
+      ${strategyCard('growth','Рост с усреднением','Увеличение позиции на подтверждённых откатах',['EMA','объём','трейлинг'])}
+      ${strategyCard('conservative','Консервативная','Минимизация риска и стабильность',['лимиты долей','низкая β','резерв'])}
+      ${strategyCard('pump','Радар пампов','Реакция на импульс цены и объёма',['1–5 мин интервалы','кулдаун','жёсткий SL'])}
+    </div>
+  `;
+  setTimeout(()=>{
+    document.querySelectorAll('.strategy-toggle').forEach(sw=>{
+      sw.onchange=e=>{
+        const key=e.target.dataset.key;
+        state.strategies[key]=e.target.checked;
+        log(`Стратегия ${key} ${e.target.checked?'включена':'выключена'}`);
+      };
+    });
+  },0);
+  return dom;
+}
+
+function strategyCard(key,title,desc,tags=[]){
+  const on = !!state.strategies[key];
+  const tgs = tags.map(t=>`<span class="tag">${t}</span>`).join(' ');
+  return `
+  <div class="card">
+    <div class="title">
+      <div><strong>${title}</strong><div class="muted">${desc}</div></div>
+      <label class="switch"><input class="strategy-toggle" data-key="${key}" type="checkbox" ${on?'checked':''}><span></span></label>
+    </div>
+    <div class="grid cols-2">
+      <div>
+        <div class="muted">Вес стратегии</div>
+        <input class="slider" type="range" min="0" max="100" step="1" value="${fmt(state.weights[key])}" oninput="state.weights['${key}']=parseFloat(this.value); normalizeWeights(); renderPage('strategies');"/>
+      </div>
+      <div>
+        <div class="muted">Макс. риск на сделку</div>
+        <input class="slider" type="range" min="0.2" max="3" step="0.1" value="${fmt(state.limits.maxRiskPerTrade)}" oninput="state.limits.maxRiskPerTrade=parseFloat(this.value);"/>
+      </div>
+    </div>
+    <div class="row">${tgs}</div>
+  </div>`;
+}
+
+function pagePositions(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="panel">
+      <h2>Открытые позиции</h2>
+      <table>
+        <thead><tr><th>Монета</th><th>Стратегия</th><th>Цена входа</th><th>Текущая</th><th>PnL%</th><th>TP / SL</th><th>Действия</th></tr></thead>
+        <tbody id="posBody"></tbody>
+      </table>
+    </div>
+  `;
+  setTimeout(()=>renderPositions(),0);
+  return dom;
+}
+
+
+// ===== Trade Simulation State =====
+state.positions = [
+  {coin:'ADAUSDT', strat:'growth', entry:0.42, price:0.44, tp:0.48, sl:0.40, openTime:Date.now()-3600e3},
+  {coin:'HBARUSDT', strat:'anchors', entry:0.078, price:0.076, tp:0.085, sl:0.074, openTime:Date.now()-7200e3}
+];
+state.closed = [];
+
+// Utility to add a new random trade (demo)
+function simulateTradeOpen(){
+  const coins = ['ADAUSDT','HBARUSDT','BONKUSDT','XRPUSDT','DOGEUSDT'];
+  const strats = ['growth','anchors','pump','conservative'];
+  const coin = coins[Math.floor(Math.random()*coins.length)];
+  const strat = strats[Math.floor(Math.random()*strats.length)];
+  // pick pseudo-price baseline
+  const px = +(Math.random()*2+0.2).toFixed(4);
+  const entry = px;
+  const tp = +(px*(1+ (Math.random()*0.05+0.02))).toFixed(4); // +2–7%
+  const sl = +(px*(1- (Math.random()*0.03+0.01))).toFixed(4); // -1–4%
+  const p = {coin,strat,entry,price:entry,tp,sl,openTime:Date.now()};
+  state.positions.unshift(p);
+  log(`Открыта позиция ${coin} (${strat}) @ ${entry}`);
+}
+
+// Randomly close a position by TP/SL
+function simulateTradeClose(){
+  if(state.positions.length===0) return;
+  const i = Math.floor(Math.random()*state.positions.length);
+  const p = state.positions[i];
+  const hitTp = Math.random()<0.5;
+  const exit = hitTp ? p.tp : p.sl;
+  const pnl = (exit/p.entry-1)*100;
+  state.positions.splice(i,1);
+  state.closed.unshift({coin:p.coin,strat:p.strat,entry:p.entry,exit,pnl,closeTime:Date.now(),reason:hitTp?'TP':'SL'});
+  log(`Закрыта ${p.coin} по ${hitTp?'TP':'SL'} @ ${exit} (${pnl.toFixed(2)}%)`);
+}
+
+// Periodic simulation timers
+setInterval(()=>{ if(state.running && !state.kill){ simulateTradeOpen(); if(document.querySelector('#content').innerHTML.includes('Позиции')) renderPage('positions'); } }, 10000);
+setInterval(()=>{ if(state.running && !state.kill){ simulateTradeClose(); if(document.querySelector('#content').innerHTML.includes('Позиции')) renderPage('positions'); } }, 13000);
+
+// ===== Override positions rendering to use state =====
+function renderPositions(){
+  const data=state.positions; const tb = document.getElementById('posBody');
+  tb.innerHTML='';
+  data.forEach(r=>{
+    const pnl = (r.price/r.entry-1)*100;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.coin}</td>
+      <td>${({growth:'Рост',anchors:'2Я+1Р',pump:'Памп',conservative:'Консерв.'}[r.strat])}</td>
+      <td>${fmt(r.entry)}</td><td>${fmt(r.price)}</td>
+      <td class="${pnl>=0?'ok-text':'danger-text'}">${fmt(pnl)}%</td>
+      <td>${fmt(r.tp)} / ${fmt(r.sl)}</td>
+      <td>
+        <button class="btn">Трейлинг</button>
+        <button class="btn">Изм. TP/SL</button>
+        <button class="btn danger">Закрыть</button>
+      </td>`;
+    document.getElementById('posBody').appendChild(tr);
+  });
+}
+
+function pageRadar(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="grid cols-2">
+      <div class="panel">
+        <h2>Настройки радара</h2>
+        <div class="row"><div style="width:220px">+5% / 1 мин</div><input class="slider" type="range" min="1" max="15" step="1" value="${state.radar.th1}" oninput="state.radar.th1=parseInt(this.value)"><div>${state.radar.th1}%</div></div>
+        <div class="row"><div style="width:220px">+15% / 15 мин</div><input class="slider" type="range" min="5" max="40" step="1" value="${state.radar.th15}" oninput="state.radar.th15=parseInt(this.value)"><div>${state.radar.th15}%</div></div>
+        <div class="row"><div style="width:220px">+30% / 60 мин</div><input class="slider" type="range" min="10" max="80" step="1" value="${state.radar.th60}" oninput="state.radar.th60=parseInt(this.value)"><div>${state.radar.th60}%</div></div>
+        <div class="row"><div style="width:220px">Мин. объём (USD)</div><input class="slider" type="range" min="10000" max="500000" step="10000" value="${state.radar.minVolUSD}" oninput="state.radar.minVolUSD=parseInt(this.value)"><div>${state.radar.minVolUSD.toLocaleString()}</div></div>
+        <div class="hint">Фильтры защищают от неликвидных всплесков.</div>
+      </div>
+      <div class="panel">
+        <h2>События (демо)</h2>
+        <table>
+          <thead><tr><th>Монета</th><th>Окно</th><th>Рост</th><th>Объём</th><th>Действие</th></tr></thead>
+          <tbody>
+            <tr><td>XYZUSDT</td><td>1 мин</td><td class="ok-text">+6.2%</td><td>+180%</td><td><button class="btn">Открыть 1.5%</button></td></tr>
+            <tr><td>QWEUSDT</td><td>15 мин</td><td class="ok-text">+18.1%</td><td>+240%</td><td><button class="btn">В Watchlist</button></td></tr>
+            <tr><td>AAAUSDT</td><td>60 мин</td><td class="ok-text">+34.9%</td><td>+90%</td><td><button class="btn danger">Игнор</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  return dom;
+}
+
+
+function pageChart(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="panel">
+      <h2>Свечной график (демо)</h2>
+      <div class="row">
+        <label>Монета:
+          <select id="chartSymbol" class="input">
+            <option>ADAUSDT</option>
+            <option>HBARUSDT</option>
+            <option>BONKUSDT</option>
+          </select>
+        </label>
+        <label style="margin-left:10px">Таймфрейм:
+          <select id="chartTf" class="input">
+            <option>1m</option>
+            <option selected>5m</option>
+            <option>15m</option>
+          </select>
+        </label>
+      </div>
+      <canvas id="candle" style="height:300px;margin-top:10px"></canvas>
+      <div class="hint">Линии показывают цену входа (Entry), TP и SL для выбранной монеты. Маркеры: ▲ — вход, ● зелёная — TP, ● красная — SL.</div>
+    </div>
+    <div class="panel">
+      <h2>История входов/выходов (по выбранной монете)</h2>
+      <table>
+        <thead><tr><th>Время</th><th>Действие</th><th>Цена</th><th>PnL%</th><th>Стратегия</th></tr></thead>
+        <tbody id="histBody"></tbody>
+      </table>
+    </div>
+  `;
+  setTimeout(()=>{
+    drawCandles('candle', getChartData(), getLevels());
+    document.getElementById('chartSymbol').onchange=()=>{ drawCandles('candle', getChartData(), getLevels()); renderHistory(document.getElementById('chartSymbol').value); };
+    document.getElementById('chartTf').onchange=()=>{ drawCandles('candle', getChartData(), getLevels()); };
+  },0);
+  return dom;
+}
+
+function getLevels(){
+  const sym = document.getElementById('chartSymbol')?.value || 'ADAUSDT';
+  const map = {
+    'ADAUSDT': {entry:0.42, tp:0.48, sl:0.40},
+    'HBARUSDT': {entry:0.078, tp:0.085, sl:0.074},
+    'BONKUSDT': {entry:0.000024, tp:0.000030, sl:0.000023}
+  };
+  return map[sym] || {entry:1, tp:1.1, sl:0.95};
+}
+
+function getChartData(){
+  // Generate fake OHLC data
+  const n = 80;
+  let o=100, h=102, l=98, c=101;
+  const rows=[];
+  for(let i=0;i<n;i++){
+    const drift = (Math.random()-0.5)*1.2;
+    const vol = Math.random()*1.5+0.5;
+    o=c;
+    c = Math.max(0.1, c + drift);
+    h = Math.max(o,c) + Math.random()*vol;
+    l = Math.min(o,c) - Math.random()*vol;
+    rows.push({o,h,l,c});
+  }
+  return rows;
+}
+
+function drawCandles(canvasId, data, levels){
+  const cv = document.getElementById(canvasId);
+  const ctx = cv.getContext('2d');
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width=W; cv.height=H;
+  ctx.clearRect(0,0,W,H);
+  // Scale
+  const max = Math.max(...data.map(d=>d.h));
+  const min = Math.min(...data.map(d=>d.l));
+  const pad = (max-min)*0.1;
+  const top = max+pad, bot=min-pad;
+  function yv(v){ return H - (v-bot)/(top-bot)*H; }
+  const w = Math.max(3, Math.floor(W / data.length)-1);
+  // Draw wicks and bodies
+  data.forEach((d,i)=>{
+    const x = i*(w+1)+2;
+    ctx.strokeStyle = d.c>=d.o ? '#7cffb7' : '#ff5c7a';
+    ctx.beginPath();
+    ctx.moveTo(x+w/2, yv(d.h));
+    ctx.lineTo(x+w/2, yv(d.l));
+    ctx.stroke();
+    ctx.fillStyle = d.c>=d.o ? 'rgba(124,255,183,.25)' : 'rgba(255,92,122,.25)';
+    ctx.fillRect(x, yv(Math.max(d.o,d.c)), w, Math.max(1, Math.abs(yv(d.c)-yv(d.o))));
+    ctx.strokeRect(x, yv(Math.max(d.o,d.c)), w, Math.max(1, Math.abs(yv(d.c)-yv(d.o))));
+  });
+  // Entry/TP/SL lines
+  const lines = [
+    {val:levels.entry, label:'Entry', color:'#78c6ff'},
+    {val:levels.tp, label:'TP', color:'#4ad295'},
+    {val:levels.sl, label:'SL', color:'#ff5c7a'}
+  ];
+  ctx.lineWidth=1.2;
+
+  // Draw trade markers (demo): entries (▲) and exits (●)
+  const sym = document.getElementById('chartSymbol')?.value || 'ADAUSDT';
+  const entries = state.positions.filter(p=>p.coin===sym).slice(0,5);
+  ctx.fillStyle='#ffffff'; ctx.strokeStyle='#ffffff';
+  entries.forEach((t,idx)=>{
+    const yE = yv(t.entry);
+    ctx.beginPath(); ctx.moveTo(8+idx*14, yE-6); ctx.lineTo(14+idx*14, yE-6); ctx.lineTo(11+idx*14, yE); ctx.closePath(); ctx.fill();
+  });
+  const exits = state.closed.filter(c=>c.coin===sym).slice(0,5);
+  exits.forEach((t,idx)=>{
+    const yX = yv(t.exit);
+    ctx.beginPath(); ctx.arc(12+idx*16, yX, 4, 0, Math.PI*2);
+    ctx.fillStyle = t.pnl>=0 ? '#4ad295' : '#ff5c7a';
+    ctx.fill();
+  });
+  lines.forEach(L=>{
+    const y = yv(L.val);
+    ctx.strokeStyle=L.color;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+    ctx.fillStyle=L.color; ctx.fillText(`${L.label}: ${L.val}`, 8, y-4);
+  });
+}
+
+function pageOrders(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="panel">
+      <h2>Последние ордера (демо)</h2>
+      <table>
+        <thead><tr><th>Время</th><th>Монета</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>Стратегия</th><th>Статус</th></tr></thead>
+        <tbody>
+          <tr><td>09:12:11</td><td>ADAUSDT</td><td>BUY</td><td>0.4200</td><td>120</td><td>Рост</td><td><span class="pill-status">Filled</span></td></tr>
+          <tr><td>10:07:43</td><td>HBARUSDT</td><td>SELL</td><td>0.0765</td><td>600</td><td>2Я+1Р</td><td><span class="pill-status">Filled</span></td></tr>
+          <tr><td>10:25:02</td><td>BONKUSDT</td><td>BUY</td><td>0.000024</td><td>120000</td><td>Памп</td><td><span class="pill-status">Rejected (Limit)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+  return dom;
+}
+
+function pageAllocator(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="panel">
+      <h2>Межстратегическое распределение</h2>
+      <div id="weights2"></div>
+      <div class="row">
+        <div class="kv"><div class="k">Резерв</div><div class="v">${fmt(state.portfolioCap.reserve)}%</div></div>
+        <div class="kv"><div class="k">Min позиция</div><div class="v">${fmt(state.portfolioCap.minPos)}%</div></div>
+        <div class="kv"><div class="k">Max позиция</div><div class="v">${fmt(state.portfolioCap.maxPos)}%</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Внутри стратегии — лимиты</h2>
+      <div class="grid cols-3">
+        <div class="card">
+          <div class="title"><strong>Консервативная</strong><span class="muted">Доля риск‑активов ≤ 10%</span></div>
+          <input class="slider" type="range" min="0" max="30" step="1" value="10"/>
+        </div>
+        <div class="card">
+          <div class="title"><strong>Рост с усреднением</strong><span class="muted">3 ступени по 0.7%</span></div>
+          <input class="slider" type="range" min="1" max="5" step="1" value="3"/>
+        </div>
+        <div class="card">
+          <div class="title"><strong>Памп</strong><span class="muted">Лимит сделки ≤ 2%</span></div>
+          <input class="slider" type="range" min="0.5" max="5" step="0.1" value="2"/>
+        </div>
+      </div>
+    </div>
+  `;
+  setTimeout(()=>renderWeights2(dom.querySelector('#weights2')),0);
+  return dom;
+}
+function renderWeights2(container){
+  container.innerHTML='';
+  Object.entries(state.weights).forEach(([k,v])=>{
+    const label = {conservative:'Консервативная',growth:'Рост с усреднением',anchors:'2 якоря + 1 ракета',pump:'Радар пампов'}[k];
+    const row = document.createElement('div'); row.className='row'; row.style.margin='8px 0';
+    row.innerHTML = `<div style="width:220px">${label}</div>
+    <input class="slider" type="range" min="0" max="100" step="1" value="${v}" />
+    <div style="width:56px;text-align:right">${fmt(v)}%</div>`;
+    const s = row.querySelector('input');
+    s.oninput=()=>{ state.weights[k]=parseFloat(s.value); normalizeWeights(); renderPage('allocator'); };
+    container.appendChild(row);
+  });
+}
+
+function pageLimits(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="grid cols-2">
+      <div class="panel">
+        <h2>Кольцо защиты</h2>
+        <div class="row"><div style="width:220px">Дневная просадка (Stop)</div><input class="slider" type="range" min="1" max="20" step="1" value="${state.limits.dailyLoss}" oninput="state.limits.dailyLoss=parseInt(this.value)"><div>${state.limits.dailyLoss}%</div></div>
+        <div class="row"><div style="width:220px">Макс. убыточных сделок/день</div><input class="slider" type="range" min="1" max="10" step="1" value="${state.limits.maxLosingTrades}" oninput="state.limits.maxLosingTrades=parseInt(this.value)"><div>${state.limits.maxLosingTrades}</div></div>
+        <div class="row"><div style="width:220px">Риск на сделку</div><input class="slider" type="range" min="0.2" max="3" step="0.1" value="${state.limits.maxRiskPerTrade}" oninput="state.limits.maxRiskPerTrade=parseFloat(this.value)"><div>${fmt(state.limits.maxRiskPerTrade)}%</div></div>
+        <div class="hint">Все стратегии проходят через эти стопоры.</div>
+      </div>
+      <div class="panel">
+        <h2>Системные лимиты</h2>
+        <div class="row"><label>minQty/minNotional: <select><option>Проверять</option><option>Игнорировать (небезопасно)</option></select></label></div>
+        <div class="row"><label>Rate limit: <select><option>Строгий</option><option>Обычный</option><option>Свободный</option></select></label></div>
+        <div class="row"><label>Дубликаты ордеров: <select><option>Запретить</option><option>Разрешить (dev)</option></select></label></div>
+      </div>
+    </div>
+  `;
+  return dom;
+}
+
+function pageSettings(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    
+    <div class="panel">
+      <h2>API Ключи</h2>
+      <div class="grid cols-2">
+        <div>
+          <label>Binance API Key</label>
+          <input class="input" type="text" placeholder="Введи API Key" id="apiKey"/>
+        </div>
+        <div>
+          <label>Binance Secret</label>
+          <input class="input" type="password" placeholder="Введи Secret" id="apiSecret"/>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn ok" onclick="saveAPI()">Сохранить ключи</button>
+        <span class="hint" id="apiSaveHint"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Настройки</h2>
+      <div class="grid cols-3">
+        <div class="kv"><div class="k">API Mode</div><div class="v">Simulator / Read‑Only / Trade</div></div>
+        <div class="kv"><div class="k">Часовой пояс</div><div class="v">America/Chicago</div></div>
+        <div class="kv"><div class="k">Отчёты</div><div class="v">09:00 и вечер</div></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>Тема: <select><option>Тёмная</option><option>Светлая</option></select></label>
+        <label>Язык: <select><option>RU</option><option>EN</option></select></label>
+        <label>2FA: <select><option>Включено</option><option>Отключено</option></select></label>
+      </div>
+    </div>
+  `;
+  return dom;
+}
+
+function pageLogs(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="panel">
+      <h2>Журнал событий</h2>
+      <div id="logbox" style="white-space:pre-wrap;background:#0f131a;border:1px solid var(--border);border-radius:12px;padding:10px;min-height:160px;max-height:320px;overflow:auto"></div>
+    </div>
+  `;
+  setTimeout(()=>renderLog(),0);
+  return dom;
+}
+function renderLog(){
+  const box=document.getElementById('logbox');
+  box.textContent = state.log.join('\n');
+}
+
+function pageHelp(){
+  const dom = document.createElement('div');
+  dom.innerHTML = `
+    <div class="panel">
+      <h2>Справка</h2>
+      <p class="muted">Это интерактивный прототип интерфейса. Нажимай на вкладки, двигай слайдеры, включай/выключай стратегии, пробуй Kill‑Switch.</p>
+      <ul>
+        <li><span class="kbd">Старт</span> — переключает статус работы (демо).</li>
+        <li><span class="kbd">Kill‑Switch</span> — активирует защиту, сделки блокируются (симуляция).</li>
+        <li><span class="kbd">Сохранить</span> — добавляет запись в журнал.</li>
+      </ul>
+    </div>
+  `;
+  return dom;
+}
+
+function renderPage(id){
+  content.innerHTML='';
+  let page;
+  if(id==='dashboard') page = pageDashboard();
+  else if(id==='strategies') page = pageStrategies();
+  else if(id==='positions') page = pagePositions();
+  else if(id==='radar') page = pageRadar();
+  else if(id==='chart') page = pageChart();
+  else if(id==='orders') page = pageOrders();
+  else if(id==='allocator') page = pageAllocator();
+  else if(id==='limits') page = pageLimits();
+  else if(id==='settings') page = pageSettings();
+  else if(id==='logs') page = pageLogs();
+  else page = pageHelp();
+  content.appendChild(page);
+}
+
+function drawEq(){
+  const c=document.getElementById('eq');
+  if(!c) return;
+  const ctx=c.getContext('2d');
+  const W=c.clientWidth, H=c.clientHeight;
+  c.width=W; c.height=H;
+  // Fake sparkline
+  let x=0, y=H*0.6, vx=2;
+  const pts=[];
+  for(let i=0;i<W;i+=2){
+    let ny = y + (Math.random()-0.5)*6;
+    ny = Math.max(H*0.2, Math.min(H*0.8, ny));
+    pts.push({x:i, y:ny});
+    y=ny;
+  }
+  ctx.strokeStyle='#78c6ff'; ctx.lineWidth=2;
+  ctx.beginPath();
+  pts.forEach((p,i)=>{ if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y); });
+  ctx.stroke();
+}
+
+document.getElementById('btnStart').onclick=()=>{
+  state.running=!state.running;
+  log(state.running?'Бот запущен':'Бот остановлен');
+  renderPage('dashboard');
+  renderLog();
+};
+document.getElementById('btnKill').onclick=()=>{
+  state.kill=!state.kill;
+  log(state.kill?'Kill‑Switch ВКЛ':'Kill‑Switch ВЫКЛ');
+  renderPage('dashboard');
+  renderLog();
+};
+document.getElementById('btnSave').onclick=()=>{
+  log('Настройки сохранены (демо)');
+  renderLog();
+};
+
+// init
+renderMenu('dashboard');
+renderPage('dashboard');
+
+// ---- Simulation ----
+function simulateAuto(){
+  // Update radar pumps list randomly
+  if(document.querySelector('#content').innerHTML.includes('Радар пампов')){
+    const tbl = document.querySelectorAll('tbody')[1];
+    if(tbl){
+      const coins = ['BTC','ETH','XRP','DOGE','ADA','SOL','PEPE','SHIB'];
+      const randCoin = coins[Math.floor(Math.random()*coins.length)]+'USDT';
+      const randWin = ['1 мин','15 мин','60 мин'][Math.floor(Math.random()*3)];
+      const randGrowth = (Math.random()*50+5).toFixed(1);
+      const randVol = (Math.random()*300+50).toFixed(0)+'%';
+      tbl.innerHTML = `<tr><td>${randCoin}</td><td>${randWin}</td><td class="ok-text">+${randGrowth}%</td><td>${randVol}</td><td><button class="btn">Открыть 1.5%</button></td></tr>` + tbl.innerHTML;
+    }
+  }
+  // Random weight changes to simulate auto-rebalance
+  if(Math.random()<0.2){
+    const keys = Object.keys(state.weights);
+    const k = keys[Math.floor(Math.random()*keys.length)];
+    state.weights[k] += (Math.random()-0.5)*2;
+    normalizeWeights();
+    if(document.querySelector('#content').innerHTML.includes('Панель')) renderPage('dashboard');
+  }
+  // Random trigger of Kill-Switch
+  if(Math.random()<0.05 && !state.kill){
+    state.kill = true;
+    log('Авто: Kill‑Switch сработал (симуляция)');
+    if(document.querySelector('#content').innerHTML.includes('Панель')) renderPage('dashboard');
+    renderLog();
+  }
+}
+
+setInterval(simulateAuto, 5000);
+
+function saveAPI(){
+  const key = document.getElementById('apiKey').value.trim();
+  const sec = document.getElementById('apiSecret').value.trim();
+  if(key && sec){
+    document.getElementById('apiSaveHint').textContent = 'Сохранено (демо)';
+    log('API ключи сохранены (демо)');
+  } else {
+    document.getElementById('apiSaveHint').textContent = 'Ошибка: введите оба поля';
+  }
+}
+
+
+let eqData = [];
+function updateEqSeries(){
+  // Keep 120 points
+  if(eqData.length===0){ for(let i=0;i<60;i++){ eqData.push(100 + (Math.random()-0.5)*2); } }
+  const last = eqData[eqData.length-1];
+  eqData.push(last + (Math.random()-0.5)*1.2);
+  if(eqData.length>120) eqData.shift();
+}
+function redrawEq(){
+  const c=document.getElementById('eq'); if(!c) return;
+  const ctx=c.getContext('2d');
+  const W=c.clientWidth, H=c.clientHeight; c.width=W; c.height=H;
+  const min=Math.min(...eqData), max=Math.max(...eqData);
+  const pad=(max-min)*0.1; const top=max+pad, bot=min-pad;
+  function yv(v){ return H - (v-bot)/(top-bot)*H; }
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle='#78c6ff'; ctx.lineWidth=2;
+  ctx.beginPath();
+  eqData.forEach((v,i)=>{ const x=i*(W/(eqData.length-1)); const y=yv(v); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+  ctx.stroke();
+}
+setInterval(()=>{
+  updateEqSeries();
+  if(document.querySelector('#content').innerHTML.includes('Панель')){ redrawEq(); updateLastGuard(); }
+}, 3000);
+
+function updateLastGuard(){
+  const el = document.getElementById('lastGuard');
+  if(!el) return;
+  const event = state.log.find(l=>l.includes('Kill‑Switch'));
+  el.textContent = event ? event : 'Пока без событий.';
+}
+
+
+function renderHistory(sym){
+  const body = document.getElementById('histBody'); if(!body) return;
+  const rows = [];
+  // open positions for symbol (entries)
+  state.positions.filter(p=>p.coin===sym).slice(0,10).forEach(p=>{
+    rows.push(`<tr><td>${new Date(p.openTime).toLocaleTimeString()}</td><td>Entry</td><td>${fmt(p.entry)}</td><td>-</td><td>${p.strat}</td></tr>`);
+  });
+  // closed trades for symbol (exits)
+  state.closed.filter(c=>c.coin===sym).slice(0,10).forEach(c=>{
+    const cls = c.pnl>=0 ? 'ok-text' : 'danger-text';
+    rows.push(`<tr><td>${new Date(c.closeTime).toLocaleTimeString()}</td><td>${c.reason}</td><td>${fmt(c.exit)}</td><td class="${cls}">${fmt(c.pnl)}%</td><td>${c.strat}</td></tr>`);
+  });
+  body.innerHTML = rows.join('');
+}
+
+</script>
+</body>
+</html>

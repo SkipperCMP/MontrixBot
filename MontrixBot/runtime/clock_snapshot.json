@@ -1,0 +1,14 @@
+{
+  "_schema": {
+    "name": "runtime.clock_snapshot",
+    "version": 1
+  },
+  "ts_wall_ms": 1766937976273,
+  "ts_exchange_ms": 1766937976218,
+  "meta": {
+    "source": "EXCHANGE",
+    "offset_ms": -55,
+    "recv_window_ms": 5000,
+    "offset_ts_ms": 1765787837419
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "_schema": {
+    "name": "runtime.incidents_last",
+    "version": 1
+  },
+  "stats": {
+    "incidents_total": 0,
+    "levels": []
+  },
+  "incidents": []
+}

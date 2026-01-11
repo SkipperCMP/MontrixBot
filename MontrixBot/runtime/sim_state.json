@@ -1,0 +1,20 @@
+{
+  "ts": 1768051021,
+  "symbol": "ADAUSDT",
+  "last_price": 0.39175,
+  "portfolio": {
+    "equity": 1000.0,
+    "cash": 1000.0,
+    "open_positions_count": 0,
+    "pnl_total_pct": 0.0,
+    "pnl_day_pct": 0.0
+  },
+  "active": [],
+  "closed_trades": [],
+  "trades": [],
+  "meta": {
+    "version": "sim_state_v1",
+    "saved_at": 1768162900.9974697,
+    "loaded_at": 1768162900.9954708
+  }
+}

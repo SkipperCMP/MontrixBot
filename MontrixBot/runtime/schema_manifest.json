@@ -1,0 +1,24 @@
+{
+  "_schema": {
+    "name": "runtime.schema_manifest",
+    "version": 1
+  },
+  "ts_wall_ms": 1766937967815,
+  "artifacts": {
+    "runtime.signals_record": {
+      "version": 1
+    },
+    "runtime.clock_snapshot": {
+      "version": 1
+    },
+    "runtime.replay_last": {
+      "version": 1
+    },
+    "runtime.incidents_last": {
+      "version": 1
+    },
+    "runtime.readiness_last": {
+      "version": 1
+    }
+  }
+}
