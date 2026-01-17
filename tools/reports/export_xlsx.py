@@ -14,13 +14,16 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+
 # -------- Dependency hardening --------
 try:
-    from openpyxl import Workbook
+    # openpyxl is optional; if present, use it for XLSX generation
+    from openpyxl import Workbook  # type: ignore
+    _OPENPYXL_AVAILABLE = True
 except ImportError:
-    print("XLSX export requires dependency: openpyxl")
-    print("Install with: pip install openpyxl")
-    sys.exit(1)
+    # do not abort if openpyxl is missing; fall back to CSV exports
+    _OPENPYXL_AVAILABLE = False
+    Workbook = None  # type: ignore
 
 
 RUNTIME_DIR = Path("runtime")
@@ -74,19 +77,20 @@ def _load_equity_history(path: Path) -> list[tuple]:
 
 
 def export_xlsx(out_path: Path) -> Path:
+    """
+    Export portfolio data to XLSX if openpyxl is installed;
+    otherwise fall back to CSV files. Returns the path to the
+    generated file or directory.
+    """
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Load runtime data
     status = _load_json(RUNTIME_DIR / "status.json")
     sim_state = _load_json(RUNTIME_DIR / "sim_state.json")
     trades = _load_jsonl(RUNTIME_DIR / "trades.jsonl")
     equity = _load_equity_history(RUNTIME_DIR / "equity_history.csv")
 
-    wb = Workbook()
-
-    # -------- Summary sheet --------
-    ws = wb.active
-    ws.title = "Summary"
-
+    # Prepare summary rows
     summary_rows = [
         ("equity_current", status.get("equity") or sim_state.get("equity")),
         ("pnl_day_pct", status.get("pnl_day_pct")),
@@ -96,32 +100,71 @@ def export_xlsx(out_path: Path) -> Path:
         ("snapshot_ts", status.get("snapshot_ts") or status.get("ts")),
     ]
 
-    ws.append(("field", "value"))
-    for k, v in summary_rows:
-        ws.append((k, v))
-
-    # -------- Equity sheet --------
-    ws_eq = wb.create_sheet("Equity")
-    ws_eq.append(("ts", "equity"))
-    for ts, eq in equity:
-        ws_eq.append((ts, eq))
-
-    # -------- Trades sheet --------
-    ws_tr = wb.create_sheet("Trades")
-    ws_tr.append(("ts", "symbol", "side", "qty", "price", "status", "source"))
-    for t in trades:
-        ws_tr.append((
-            t.get("ts"),
-            t.get("symbol"),
-            t.get("side"),
-            t.get("qty"),
-            t.get("price"),
-            t.get("status"),
-            t.get("source"),
-        ))
-
-    wb.save(out_path)
-    return out_path
+    if _OPENPYXL_AVAILABLE and Workbook is not None:
+        # Generate an XLSX workbook using openpyxl
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Summary"
+        ws.append(("field", "value"))
+        for k, v in summary_rows:
+            ws.append((k, v))
+        ws_eq = wb.create_sheet("Equity")
+        ws_eq.append(("ts", "equity"))
+        for ts, eq in equity:
+            ws_eq.append((ts, eq))
+        ws_tr = wb.create_sheet("Trades")
+        ws_tr.append(("ts", "symbol", "side", "qty", "price", "status", "source"))
+        for t in trades:
+            ws_tr.append((
+                t.get("ts"),
+                t.get("symbol"),
+                t.get("side"),
+                t.get("qty"),
+                t.get("price"),
+                t.get("status"),
+                t.get("source"),
+            ))
+        wb.save(out_path)
+        return out_path
+    else:
+        # Fall back to CSV exports: write summary, equity and trades as separate CSV files
+        base_stem = out_path.stem
+        summary_path = EXPORTS_DIR / f"{base_stem}_summary.csv"
+        equity_path = EXPORTS_DIR / f"{base_stem}_equity.csv"
+        trades_path = EXPORTS_DIR / f"{base_stem}_trades.csv"
+        try:
+            with summary_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["field", "value"])
+                for row in summary_rows:
+                    writer.writerow(row)
+        except Exception:
+            pass
+        try:
+            with equity_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ts", "equity"])
+                for ts, eq in equity:
+                    writer.writerow([ts, eq])
+        except Exception:
+            pass
+        try:
+            with trades_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ts", "symbol", "side", "qty", "price", "status", "source"])
+                for t in trades:
+                    writer.writerow([
+                        t.get("ts"),
+                        t.get("symbol"),
+                        t.get("side"),
+                        t.get("qty"),
+                        t.get("price"),
+                        t.get("status"),
+                        t.get("source"),
+                    ])
+        except Exception:
+            pass
+        return EXPORTS_DIR
 
 
 def main():

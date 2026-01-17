@@ -82,41 +82,42 @@ class MemorySink:
         except Exception:
             return []
 
+# ---- New JSONL sink ----
+
 class JsonlNotificationSink:
     """
     Append-only JSONL sink for notification events.
 
-    - Core-owned
-    - Best-effort
-    - Never raises
-    - Writes to runtime/notifications.jsonl
+    Writes each event to ``runtime/notifications.jsonl`` (creates directories as needed).
+    This sink is best-effort: it never raises and silently ignores errors.
     """
-
     def __init__(self, path: str = "runtime/notifications.jsonl") -> None:
-        self._path = Path(path)
-        self._lock = threading.RLock()
+        self._path: Path = Path(path)
+        self._lock: threading.RLock = threading.RLock()
 
     def handle(self, event: NotificationEvent) -> None:
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-
-            meta = {}
-            if isinstance(getattr(event, "meta", None), dict):
-                meta = dict(event.meta)
-
-            data = {
+            payload = {
                 "ts": float(getattr(event, "ts", 0.0)),
-                "level": str(getattr(event, "level", "INFO")),
-                "topic": str(getattr(event, "topic", "system")),
-                "message": str(getattr(event, "message", "")),
-                "meta": meta,
+                "level": str(getattr(event, "level", "INFO") or "INFO"),
+                "topic": str(getattr(event, "topic", "system") or "system"),
+                "message": str(getattr(event, "message", "") or ""),
+                "meta": {},
             }
+            meta = getattr(event, "meta", None)
+            if isinstance(meta, dict):
+                try:
+                    payload["meta"] = dict(meta)
+                except Exception:
+                    payload["meta"] = {}
 
-            line = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            line = line.replace("\r", "").replace("\n", "\\n")
 
             with self._lock:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
                 with self._path.open("a", encoding="utf-8") as f:
                     f.write(line + "\n")
         except Exception:
-            # notifications must never break runtime
             return
+
