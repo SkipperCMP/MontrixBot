@@ -56,14 +56,29 @@ def main():
         print(f"[AUTO] bumped rq to {rq} to satisfy minNotional at rp={rp}")
 
     safe_code = getpass.getpass("SAFE code: ").strip()
+    confirm_token = None
+    for a in sys.argv[1:]:
+        if isinstance(a, str) and a.strip().lower().startswith("confirm="):
+            confirm_token = a.split("=", 1)[1].strip()
+
+    if not confirm_token:
+        from core.risky_confirm import RiskyConfirmService
+        cmd_text = f"/real_sandbox_buy {symbol} qty={rq}"
+        pending = RiskyConfirmService().request(cmd_text, actor="local", ttl_s=60)
+        print("⚠️ Confirmation required.")
+        print(f"Repeat the SAME command with:\npython scripts/real_sandbox_buy.py {symbol} {qty} confirm={pending.token}")
+        raise SystemExit(2)
+
     from core.orders_real import place_order_real
-    try:
-        resp = place_order_real(symbol, "BUY", type_="MARKET", quantity=rq, safe_code=safe_code)
-        print("=== ORDER RESPONSE ===")
-        print(resp)
-    except Exception as e:
-        print("Order failed:", type(e).__name__, str(e))
-        sys.exit(1)
+    resp = place_order_real(
+        symbol, "BUY",
+        type_="MARKET",
+        quantity=rq,
+        safe_code=safe_code,
+        confirm_token=confirm_token,
+        confirm_actor="local",
+    )
+    print(json.dumps(resp, ensure_ascii=False))
 
 if __name__ == "__main__":
     main()

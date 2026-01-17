@@ -1,32 +1,76 @@
-# === ШАГ 1. Прочитать версию из файла VERSION ===
+# UTF-8 вывод в консоль (чтобы не было вЂ”)
+chcp 65001 | Out-Null
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# === ШАГ 1. Прочитать версию из файла VERSION (UTF-8) ===
 $versionFile = "VERSION"
 if (-Not (Test-Path $versionFile)) {
     Write-Host "Файл VERSION не найден!" -ForegroundColor Red
-    exit
+    exit 1
 }
 
-$version = Get-Content $versionFile -Raw
+$version = Get-Content $versionFile -Raw -Encoding UTF8
 $version = $version.Trim()
 
 Write-Host "Версия из файла VERSION: $version" -ForegroundColor Cyan
 
-# === ШАГ 2. Добавить все изменения ===
-git add .
-
-# === ШАГ 3. Создать коммит ===
-git commit -m "$version"
-
-# === ШАГ 4. Отправить на GitHub ===
-git push
-
-# === ШАГ 5. Создать тег (если тега ещё нет) и отправить его ===
-$tags = git tag
-if ($tags -notcontains $version) {
-    git tag -a $version -m "$version"
-    git push origin $version
-    Write-Host "Создан и отправлен новый тег: $version" -ForegroundColor Green
-} else {
-    Write-Host "Тег $version уже существует — пропускаю." -ForegroundColor Yellow
+function Assert-Ok([string]$step) {
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ошибка на шаге: $step (exit=$LASTEXITCODE)"
+    }
 }
 
-Write-Host "Готово! Все изменения отправлены." -ForegroundColor Green
+# === ШАГ 2. Добавить все изменения ===
+git add .
+Assert-Ok "git add ."
+
+# === ШАГ 3. Создать коммит (если есть изменения) ===
+git diff --cached --quiet
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Нет изменений для коммита — пропускаю commit." -ForegroundColor Yellow
+} else {
+    git commit -m "$version"
+    Assert-Ok "git commit"
+}
+
+# === ШАГ 4. Отправить коммиты ===
+git push
+Assert-Ok "git push"
+
+# === ШАГ 5. Сделать валидный git-tag ===
+# Берём только номер версии из строки вида "MontrixBot v2.2.105 — ...."
+$tag = $null
+if ($version -match 'v\d+\.\d+\.\d+') {
+    $tag = $Matches[0]   # например: v2.2.105
+} else {
+    # fallback: делаем безопасный slug
+    $tag = ($version.ToLowerInvariant() `
+        -replace '[—–]', '-' `
+        -replace '[^a-z0-9._-]+', '-' `
+        -replace '^-+|-+$', '' )
+}
+
+Write-Host "Tag будет: $tag" -ForegroundColor Cyan
+
+# Проверка валидности refname
+git check-ref-format "refs/tags/$tag" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Невалидное имя тега: $tag" -ForegroundColor Red
+    exit 2
+}
+
+# === ШАГ 6. Создать annotated tag (если нет) и отправить ===
+$tags = git tag
+if ($tags -notcontains $tag) {
+    git tag -a $tag -m "$version"
+    Assert-Ok "git tag -a"
+
+    git push origin $tag
+    Assert-Ok "git push origin <tag>"
+
+    Write-Host "Создан и отправлен новый тег: $tag" -ForegroundColor Green
+} else {
+    Write-Host "Тег $tag уже существует — пропускаю." -ForegroundColor Yellow
+}
+
+Write-Host "Готово! Коммиты и тег отправлены." -ForegroundColor Green

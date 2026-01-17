@@ -105,3 +105,74 @@ def export_deals_rows(
         xlsx_written = ""
 
     return {"csv": csv_path, "json": json_path, "xlsx": xlsx_written}
+
+
+def export_sim_journal_entries(
+    entries: List[Dict[str, Any]],
+    out_dir: str = EXPORT_DIR_DEFAULT,
+    csv_dir: Optional[str] = None,
+    json_dir: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Export SIM Decision Journal entries (events-only) to CSV + JSON.
+    UI-only helper. No side-effects besides writing into exports/.
+    """
+    _ensure_dir(out_dir)
+
+    base = os.path.join(out_dir, f"sim_journal_{_timestamp()}")
+    if csv_dir:
+        _ensure_dir(csv_dir)
+        csv_path = os.path.join(csv_dir, os.path.basename(base) + ".csv")
+    else:
+        csv_path = base + ".csv"
+    if json_dir:
+        _ensure_dir(json_dir)
+        json_path = os.path.join(json_dir, os.path.basename(base) + ".json")
+    else:
+        json_path = base + ".json"
+
+    # normalize
+    normalized: List[Dict[str, Any]] = []
+    for e in entries:
+        payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+        normalized.append(
+            {
+                "ts": e.get("ts") or "",
+                "ts_utc": e.get("ts_utc") or "",
+                "type": e.get("type") or "",
+                "correlation_id": e.get("correlation_id") or e.get("cid") or "",
+                "confidence": payload.get("confidence", ""),
+                "recommended_action": payload.get("recommended_action", ""),
+                "hypothesis": payload.get("hypothesis", ""),
+                "signals": payload.get("signals", {}),
+                "raw": e,
+            }
+        )
+
+    with open(json_path, "w", encoding="utf-8") as jf:
+        json.dump(normalized, jf, ensure_ascii=False, indent=2)
+
+    fieldnames = [
+        "ts_utc",
+        "ts",
+        "type",
+        "correlation_id",
+        "confidence",
+        "recommended_action",
+        "hypothesis",
+        "signals",
+    ]
+    with open(csv_path, "w", encoding="utf-8", newline="") as cf:
+        w = csv.DictWriter(cf, fieldnames=fieldnames)
+        w.writeheader()
+        for r in normalized:
+            row = {k: r.get(k, "") for k in fieldnames}
+            # keep signals compact in CSV
+            if isinstance(row.get("signals"), (dict, list)):
+                try:
+                    row["signals"] = json.dumps(row["signals"], ensure_ascii=False)
+                except Exception:
+                    row["signals"] = str(row["signals"])
+            w.writerow(row)
+
+    return {"csv": csv_path, "json": json_path}

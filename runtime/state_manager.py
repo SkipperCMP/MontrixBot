@@ -21,15 +21,14 @@ class StateManager:
     """
 
     def __init__(self, path: str = "runtime/state.json") -> None:
-        self._path = path
-        self._lock = threading.Lock()
-        directory = os.path.dirname(self._path) or "."
-        os.makedirs(directory, exist_ok=True)
-
-        if not os.path.exists(self._path):
-            # создаём минимальный state при первом запуске
-            initial = {"positions": {}, "meta": {"created_at": time.time()}}
-            self._write_atomic(initial)
+            self._path = path
+            self._lock = threading.Lock()
+            self._warned_missing = False  # log "missing state" only once per process
+            # IMPORTANT (UI READ-ONLY / test stability):
+            # Do NOT touch filesystem on construction.
+            # - No directory creation
+            # - No file creation
+            # All filesystem writes happen only via _write_atomic() (set/update).
 
     # --------------------------------------------------------------------- #
     # ВНУТРЕННИЕ МЕТОДЫ ЧТЕНИЯ/ЗАПИСИ
@@ -47,27 +46,25 @@ class StateManager:
             with open(self._path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except FileNotFoundError:
-            logger.warning("state file %s not found, recreating new one", self._path)
-            data = {"positions": {}, "meta": {"recovered_at": time.time(), "reason": "missing"}}
-            # пытаемся сохранить новый state, но не валимся, если не получилось
-            try:
-                self._write_atomic(data)
-            except Exception:  # noqa: BLE001
-                logger.exception("failed to recreate missing state file %s", self._path)
+                    # READ is side-effect free by design.
+                    if not self._warned_missing:
+                        logger.warning(
+                            "state file %s not found (read-only), returning empty state",
+                            self._path,
+                        )
+                        self._warned_missing = True
+                    data = {"positions": {}, "meta": {"recovered_at": time.time(), "reason": "missing"}}
         except json.JSONDecodeError as e:
-            logger.error("broken JSON in state file %s: %s", self._path, e)
-            data = {
-                "positions": {},
-                "meta": {
-                    "recovered_at": time.time(),
-                    "reason": "json_decode_error",
-                    "error": str(e),
-                },
-            }
-            try:
-                self._write_atomic(data)
-            except Exception:  # noqa: BLE001
-                logger.exception("failed to overwrite broken state file %s", self._path)
+                    logger.error("broken JSON in state file %s: %s", self._path, e)
+                    data = {
+                        "positions": {},
+                        "meta": {
+                            "recovered_at": time.time(),
+                            "reason": "json_decode_error",
+                            "error": str(e),
+                        },
+                    }
+                    # NOTE: do not overwrite on read; recovery happens on explicit write path.
         except OSError as e:
             # проблемы с диском/правами: state не перезаписываем, но логируем
             logger.error("I/O error reading state file %s: %s", self._path, e)
@@ -142,6 +139,11 @@ class StateManager:
     # --------------------------------------------------------------------- #
     # ПУБЛИЧНЫЙ API
     # --------------------------------------------------------------------- #
+
+    def read(self) -> Dict[str, Any]:
+            """Return the full state snapshot without mutating disk."""
+            with self._lock:
+                return dict(self._read())
 
     def get(self, key: str, default: Any = None) -> Any:
         """Безопасно получить значение по ключу из state."""

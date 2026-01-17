@@ -1,11 +1,55 @@
 # core/advisor.py
 # Простенький модуль рекомендаций по позиции на основе RSI+MACD+тренда.
+# ---------------------------------------------------------------------------
+# CANONICAL NOTICE (STEP 1.x)
+#
+# Этот модуль является ИНФРАСТРУКТУРНЫМ advisory-компонентом.
+#
+# В рамках STEP 1.x:
+# - advisor НЕ является торговой стратегией;
+# - advisor НЕ принимает решений об открытии или закрытии позиций;
+# - advisor НЕ инициирует торговое исполнение (REAL);
+# - advisor формирует только оценочные рекомендации для UI.
+#
+# Любая стратегическая логика и автоматическое принятие торговых решений
+# допускаются ТОЛЬКО начиная с STEP 1.6+ в соответствии с Master Roadmap.
+# ---------------------------------------------------------------------------
 
 from __future__ import annotations
 
 from typing import Dict, Any, Sequence, Optional
 import math
 
+# v2.2.52: Advisor remains UI-facing; journal entries are emitted by SIM strategy (core/strategies).
+# Keep advisor fully side-effect free by default.
+
+try:
+    from core.scout_notes import ScoutNotesHygiene
+except Exception:  # noqa: BLE001
+    ScoutNotesHygiene = None  # type: ignore[assignment]
+
+_SCOUT_HYGIENE = ScoutNotesHygiene(ttl_sec=10.0) if ScoutNotesHygiene is not None else None
+
+
+# v2.2.52: disabled by default — journal is emitted by SIM strategy layer
+_ADVISOR_JOURNAL_ENABLED = False
+
+
+def _publish_sim_decision_journal(payload: Dict[str, Any]) -> None:
+    """
+    Deprecated for default flow in v2.2.52.
+    Advisor should remain UI-facing and side-effect free.
+    """
+    if not _ADVISOR_JOURNAL_ENABLED:
+        return
+    try:
+        from core.event_bus import get_event_bus, make_event, new_cid
+
+        bus = get_event_bus()
+        cid = new_cid()
+        bus.publish(make_event("SIM_DECISION_JOURNAL", payload, actor="sim", cid=cid))
+    except Exception:
+        pass
 
 def _safe_float(v: Optional[float]) -> float:
     try:
@@ -133,10 +177,55 @@ def compute_recommendation(
 
     reason = ", ".join(parts)
 
-    return {
+    scout_note = None
+    try:
+        if _SCOUT_HYGIENE is not None:
+            scout_note = _SCOUT_HYGIENE.process(
+                side=reco_side,
+                confidence=float(strength or 0.0),
+                reason=str(reason or ""),
+                meta={
+                    "trend": str(trend_label),
+                    "rsi": float(rsi) if not math.isnan(rsi) else None,
+                    "macd": float(macd) if not math.isnan(macd) else None,
+                    "macd_signal": float(macd_sig) if not math.isnan(macd_sig) else None,
+                    "score": float(score or 0.0),
+                },
+            )
+    except Exception:
+        scout_note = None
+
+    out = {
         "side": reco_side,
         "strength": strength,
         "trend": trend_label,
         "score": score,
         "reason": reason,
+        "scout_note": scout_note,
     }
+
+    # --- SIM Decision Journal (disabled here in v2.2.52) ---
+    # Journal entries are emitted by core.strategies.simple_strategy_v1 (rare, filtered).
+    # Keep the old call behind a flag for debugging only.
+    if _ADVISOR_JOURNAL_ENABLED:
+        try:
+            _publish_sim_decision_journal(
+                {
+                    "hypothesis": str(reason or ""),
+                    "signals": {
+                        "input_side": str(side or "HOLD"),
+                        "rsi": (float(rsi) if not math.isnan(rsi) else None),
+                        "macd": (float(macd) if not math.isnan(macd) else None),
+                        "macd_signal": (float(macd_sig) if not math.isnan(macd_sig) else None),
+                        "trend": str(trend_label),
+                        "score": float(score),
+                    },
+                    "confidence": float(strength),
+                    "recommended_action": str(reco_side),
+                }
+            )
+        except Exception:
+            pass
+    # --- /SIM Decision Journal ---
+
+    return out

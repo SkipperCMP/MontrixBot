@@ -56,8 +56,31 @@ def main():
     if ask_mode or not safe_code:
         safe_code = getpass.getpass("SAFE code: ").strip()
 
+    # Two-step manual confirm (v2.2.105):
+    # 1) run without confirm=... -> prints token and exits without trading
+    # 2) rerun with confirm=TOKEN  -> order is allowed (still SAFE-gated)
+    confirm_token = None
+    for a in sys.argv[1:]:
+        if isinstance(a, str) and a.strip().lower().startswith("confirm="):
+            confirm_token = a.split("=", 1)[1].strip()
+
+    if not confirm_token:
+        from core.risky_confirm import RiskyConfirmService
+        cmd_text = f"/real_buy_market {symbol} qty={rq}"
+        pending = RiskyConfirmService().request(cmd_text, actor="local", ttl_s=60)
+        print("⚠️ Confirmation required.")
+        print(f"Repeat the SAME command with:\npython scripts/real_buy_market.py {symbol} {qty} confirm={pending.token}")
+        raise SystemExit(2)
+
     from core.orders_real import place_order_real
-    resp = place_order_real(symbol, "BUY", type_="MARKET", quantity=rq, safe_code=safe_code)
+    resp = place_order_real(
+        symbol, "BUY",
+        type_="MARKET",
+        quantity=rq,
+        safe_code=safe_code,
+        confirm_token=confirm_token,
+        confirm_actor="local",
+    )
     print(json.dumps(resp, ensure_ascii=False))
 
 if __name__ == "__main__":

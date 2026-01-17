@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import time
+import os
+import sys
+import threading
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -19,16 +23,14 @@ class AutosimController:
     def __init__(
         self,
         app: Any,
-        ui_state: Optional[UIState] = None,
-        uiapi_getter: Optional[Callable[[], Any]] = None,
-        save_sim_state_fn: Optional[Callable[[dict], None]] = None,
-        journal_file: Optional[Path] = None,
+        ui_state: UIState | None,
+        uiapi_getter: Callable[[], Any] | None,
+        save_sim_state_fn: Callable[[dict], None] | None,
     ) -> None:
         self.app = app
         self.ui_state = ui_state
         self._uiapi_getter = uiapi_getter
         self._save_sim_state = save_sim_state_fn
-        self._journal_file = journal_file
 
     # ------------------------------------------------------------------ helpers
 
@@ -55,6 +57,262 @@ class AutosimController:
         except Exception:
             engine = None
         return engine
+
+    # ------------------------------------------------------------------ REAL ticks feed (bookTicker)
+
+    def _project_root(self) -> Path:
+        # ui/controllers/autosim_controller.py -> ui/controllers -> ui -> ROOT
+        return Path(__file__).resolve().parents[2]
+
+    def _runtime_dir(self) -> Path:
+        return self._project_root() / "runtime"
+
+    def _get_selected_symbol(self) -> str:
+        # UI topbar uses app.var_symbol (tk.StringVar)
+        try:
+            v = getattr(self.app, "var_symbol", None)
+            if v is not None and hasattr(v, "get"):
+                s = str(v.get() or "").strip().upper()
+                if s:
+                    return s
+        except Exception:
+            pass
+
+        # fallback: sometimes app has symbol attribute
+        try:
+            s2 = str(getattr(self.app, "symbol", "") or "").strip().upper()
+            if s2:
+                return s2
+        except Exception:
+            pass
+
+        return "ADAUSDT"
+
+    def _ticks_proc(self):
+        return getattr(self.app, "_ticks_feed_proc", None)
+
+    def _start_ticks_feed_if_needed(self) -> None:
+        """
+        Start REAL bid/ask stream into runtime/ticks_stream.jsonl using tools/ticks_book_stream.py.
+        Safe: if already running -> no-op.
+        """
+        try:
+            p = self._ticks_proc()
+            if p is not None:
+                try:
+                    if p.poll() is None:
+                        # already running
+                        return
+                except Exception:
+                    pass
+
+            sym = self._get_selected_symbol()
+            root = self._project_root()
+            tool = root / "tools" / "ticks_book_stream.py"
+            if not tool.exists():
+                self._log(f"[TICKS] tool not found: {tool}")
+                return
+
+            # ensure runtime dir exists
+            try:
+                self._runtime_dir().mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
+            # log file for the feed
+            log_path = self._runtime_dir() / "ticks_feed.log"
+            try:
+                fp = open(log_path, "a", encoding="utf-8")
+            except Exception:
+                fp = None
+
+            args = [
+                sys.executable,
+                str(tool),
+                "--reset",
+                "--symbols",
+                sym,
+                "--min-ms",
+                "150",
+            ]
+
+            creationflags = 0
+            if os.name == "nt":
+                # no extra console window
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+            proc = subprocess.Popen(
+                args,
+                cwd=str(root),
+                stdout=fp if fp is not None else subprocess.DEVNULL,
+                stderr=fp if fp is not None else subprocess.STDOUT,
+                creationflags=creationflags,
+            )
+
+            setattr(self.app, "_ticks_feed_proc", proc)
+            setattr(self.app, "_ticks_feed_log_fp", fp)
+            setattr(self.app, "_ticks_feed_symbol", sym)
+
+            self._log(f"[TICKS] REAL feed ON ({sym})")
+        except Exception as e:
+            self._log(f"[TICKS] start failed: {e}")
+
+    def _stop_ticks_feed_if_running(self) -> None:
+        """Stop previously started ticks feed process (best-effort)."""
+        try:
+            proc = self._ticks_proc()
+            if proc is None:
+                return
+
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
+
+            # close log file handle if any
+            try:
+                fp = getattr(self.app, "_ticks_feed_log_fp", None)
+                if fp is not None:
+                    fp.close()
+            except Exception:
+                pass
+
+            setattr(self.app, "_ticks_feed_proc", None)
+            setattr(self.app, "_ticks_feed_log_fp", None)
+
+            self._log("[TICKS] REAL feed OFF")
+        except Exception as e:
+            self._log(f"[TICKS] stop failed: {e}")
+
+    # ------------------------------------------------------------------ ticks ingest (tail runtime/ticks_stream.jsonl -> core StateEngine)
+
+    def _ticks_ingest_stop_event(self):
+        return getattr(self.app, "_ticks_ingest_stop", None)
+
+    def _start_ticks_ingest_if_needed(self) -> None:
+        """
+        Start a background thread that tails runtime/ticks_stream.jsonl and pushes ticks into core
+        (UIAPI.on_tick(..., write_stream=False)).
+        """
+        try:
+            thr = getattr(self.app, "_ticks_ingest_thread", None)
+            if thr is not None and getattr(thr, "is_alive", lambda: False)():
+                return
+
+            stop_ev = threading.Event()
+            setattr(self.app, "_ticks_ingest_stop", stop_ev)
+
+            def _worker():
+                try:
+                    root = Path(__file__).resolve().parents[2]
+                    stream_path = root / "runtime" / "ticks_stream.jsonl"
+                    # ждём появления файла (ticks_book_stream запускается параллельно)
+                    t0 = time.time()
+                    while not stream_path.exists():
+                        if stop_ev.is_set():
+                            return
+                        if time.time() - t0 > 10.0:
+                            # не ждём вечно
+                            break
+                        time.sleep(0.1)
+
+                    api = None
+                    try:
+                        api = self.app._ensure_uiapi()
+                    except Exception:
+                        api = None
+
+                    # tail-file
+                    pos = 0
+                    while not stop_ev.is_set():
+                        if not stream_path.exists():
+                            time.sleep(0.2)
+                            continue
+
+                        try:
+                            with stream_path.open("r", encoding="utf-8", errors="ignore") as f:
+                                # если файл был reset/укорочен — начинаем сначала
+                                try:
+                                    size = stream_path.stat().st_size
+                                    if pos > size:
+                                        pos = 0
+                                except Exception:
+                                    pass
+
+                                f.seek(pos)
+                                line = f.readline()
+                                if not line:
+                                    pos = f.tell()
+                                    time.sleep(0.15)
+                                    continue
+                                pos = f.tell()
+                        except Exception:
+                            time.sleep(0.25)
+                            continue
+
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+
+                        try:
+                            sym = str(obj.get("symbol", "") or "").upper()
+                            price = obj.get("price")
+                            bid = obj.get("bid")
+                            ask = obj.get("ask")
+                            ts = obj.get("ts")
+                            if not sym or price is None:
+                                continue
+                        except Exception:
+                            continue
+
+                        # lazy re-acquire api if needed
+                        if api is None:
+                            try:
+                                api = self.app._ensure_uiapi()
+                            except Exception:
+                                api = None
+
+                        if api is None:
+                            continue
+
+                        # IMPORTANT: write_stream=False to avoid echo back into ticks_stream.jsonl
+                        try:
+                            if hasattr(api, "on_tick"):
+                                api.on_tick(sym, float(price), bid=bid, ask=ask, ts=ts, write_stream=False)
+                            else:
+                                # fallback: at least heartbeat
+                                api.on_price(sym, float(price), ts=ts)
+                        except Exception:
+                            continue
+                except Exception:
+                    return
+
+            t = threading.Thread(target=_worker, name="ticks_ingest", daemon=True)
+            setattr(self.app, "_ticks_ingest_thread", t)
+            t.start()
+            self._log("[TICKS] ingest ON (tail ticks_stream.jsonl -> core)")
+        except Exception as e:
+            self._log(f"[TICKS] ingest start failed: {e}")
+
+    def _stop_ticks_ingest_if_running(self) -> None:
+        try:
+            ev = self._ticks_ingest_stop_event()
+            if ev is not None:
+                try:
+                    ev.set()
+                except Exception:
+                    pass
+            setattr(self.app, "_ticks_ingest_stop", None)
+            setattr(self.app, "_ticks_ingest_thread", None)
+            self._log("[TICKS] ingest OFF")
+        except Exception as e:
+            self._log(f"[TICKS] ingest stop failed: {e}")
 
     def _log(self, msg: str) -> None:
         try:
@@ -206,16 +464,13 @@ class AutosimController:
             return
 
         # пишем все SELL в журнал одной пачкой
-        jf = self._journal_file
-        if jf is not None:
-            try:
-                jf.parent.mkdir(parents=True, exist_ok=True)
-                with jf.open("a", encoding="utf-8") as f:
-                    for rec in records:
-                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            except Exception:
-                # не даём ошибкам журнала ломать UI
-                pass
+        api = self._get_uiapi()
+        if api is not None and hasattr(api, "persist_trade_record"):
+            for rec in records:
+                try:
+                    api.persist_trade_record(rec)
+                except Exception:
+                    pass
 
         # после ручного закрытия руками обновляем snapshot для UI,
         # чтобы Active position (SIM) и мини-equity обновились сразу
@@ -255,13 +510,124 @@ class AutosimController:
             # любые ошибки здесь не должны ломать UI
             pass
 
-    # пока оставляем заглушку для дальнейшей интеграции c topbar
-    def bind_to_topbar(self, topbar_view: Any) -> None:
-        """Привязка кнопок Start/Stop AUTOSIM к виджету topbar.
+    def start(self) -> None:
+        """Enable AUTOSIM engine on app + RESUME trading FSM (manual stop OFF)."""
+        try:
+            # 1) Resume FSM via CommandRouter(policy,fsm)
+            try:
+                from core.autonomy_policy import AutonomyPolicyStore
+                from core.trading_state_machine import TradingStateMachine
+                from core.command_router import CommandRouter
 
-        Реализуем на следующих под-шагах STEP1.3.x, когда topbar будет
-        полностью вынесен из app_step9.
+                policy = AutonomyPolicyStore()
+                fsm = TradingStateMachine()
+                r = CommandRouter(policy, fsm).handle("/resume")
+                if r is not None and getattr(r, "ok", False):
+                    self._log("[CMD] /resume -> OK")
+                else:
+                    msg = getattr(r, "message", "") if r is not None else "no result"
+                    self._log(f"[CMD] /resume -> FAIL: {msg}")
+            except Exception as e:
+                self._log(f"[CMD] /resume failed: {e}")
+
+            # 2) Enable AUTOSIM engine (previous behavior)
+            if getattr(self.app, "_autosim", None) is not None:
+                self._log("[AUTOSIM] already ON")
+                self._refresh_toggle_button()
+                return
+
+            # Start REAL market ticks feed when user presses START
+            self._start_ticks_feed_if_needed()
+            self._start_ticks_ingest_if_needed()
+
+            factory = getattr(self.app, "_AUTOSIM_FACTORY", None)
+            if factory is None:
+                self._log("[AUTOSIM] factory not available")
+                self._refresh_toggle_button()
+                return
+
+            AutoSimFromSignals, AutoSimConfig = factory
+            self.app._autosim = AutoSimFromSignals(config=AutoSimConfig())
+            self._log("[AUTOSIM] ON")
+            self._refresh_toggle_button()
+        except Exception as e:
+            self._log(f"[AUTOSIM] start failed: {e}")
+
+    def stop(self) -> None:
+        """Disable AUTOSIM engine on app + STOP trading FSM (manual stop ON)."""
+        try:
+            # 1) Disable AUTOSIM engine (previous behavior)
+            if getattr(self.app, "_autosim", None) is None:
+                self._log("[AUTOSIM] already OFF")
+            else:
+                self.app._autosim = None
+                self._log("[AUTOSIM] OFF")
+
+            # Stop REAL ticks feed when user presses STOP
+            self._stop_ticks_feed_if_running()
+            self._stop_ticks_ingest_if_running()
+
+            # 2) Manual STOP via CommandRouter(policy,fsm)
+            try:
+                from core.autonomy_policy import AutonomyPolicyStore
+                from core.trading_state_machine import TradingStateMachine
+                from core.command_router import CommandRouter
+
+                policy = AutonomyPolicyStore()
+                fsm = TradingStateMachine()
+                r = CommandRouter(policy, fsm).handle("/stop")
+                if r is not None and getattr(r, "ok", False):
+                    self._log("[CMD] /stop -> OK")
+                else:
+                    msg = getattr(r, "message", "") if r is not None else "no result"
+                    self._log(f"[CMD] /stop -> FAIL: {msg}")
+            except Exception as e:
+                self._log(f"[CMD] /stop failed: {e}")
+
+            self._refresh_toggle_button()
+        except Exception as e:
+            self._log(f"[AUTOSIM] stop failed: {e}")
+
+    def _refresh_toggle_button(self, topbar_view=None) -> None:
+        """Update AUTOSIM toggle button text/style (best-effort)."""
+        try:
+            view = topbar_view if topbar_view is not None else self.app
+            btn = getattr(view, "btn_autosim_toggle", None) or getattr(self.app, "btn_autosim_toggle", None)
+            if btn is None or not hasattr(btn, "configure"):
+                return
+
+            is_on = getattr(self.app, "_autosim", None) is not None
+            if is_on:
+                btn.configure(text="STOP", style="AutosimOff.TButton")
+            else:
+                btn.configure(text="START", style="AutosimOn.TButton")
+        except Exception:
+            return
+
+    def toggle(self) -> None:
+        """Toggle AUTOSIM ON/OFF from a single UI button."""
+        try:
+            if getattr(self.app, "_autosim", None) is None:
+                self.start()
+            else:
+                self.stop()
+        finally:
+            self._refresh_toggle_button()
+
+    def bind_to_topbar(self, topbar_view) -> None:
         """
-        # TODO: перенести сюда реальные биндинги из App, когда topbar
-        # будет вынесен в отдельный виджет.
-        return
+        Привязка AUTOSIM Toggle к кнопке.
+        Ожидаем атрибут: btn_autosim_toggle на app (или topbar_view).
+        """
+        try:
+            btn = getattr(topbar_view, "btn_autosim_toggle", None) or getattr(self.app, "btn_autosim_toggle", None)
+
+            if btn is not None and hasattr(btn, "configure"):
+                btn.configure(command=self.toggle)
+
+            # обновим текст/цвет сразу при старте UI
+            self._refresh_toggle_button(topbar_view)
+
+            self._log("[AUTOSIM] topbar bound (toggle)")
+        except Exception as e:
+            self._log(f"[AUTOSIM] bind_to_topbar failed: {e}")

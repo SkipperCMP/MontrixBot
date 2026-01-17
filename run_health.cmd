@@ -1,9 +1,18 @@
-
 @echo off
 setlocal
 cd /d "%~dp0"
-REM You can change interval via env var below (seconds). 60 = 1 minute.
-set MTR_HEALTH_INTERVAL=60
-echo [HEALTH] Starting health monitor (interval %MTR_HEALTH_INTERVAL%s)...
-python scripts\health_monitor.py
-pause
+
+REM Health Contract runner (snapshot-only, no logs)
+REM Exit codes: 0 OK, 2 WARN, 4 FAIL
+
+if "%MTR_HEALTH_INTERVAL%"=="" set MTR_HEALTH_INTERVAL=60
+
+echo [HEALTH] Health Contract loop (interval %MTR_HEALTH_INTERVAL%s)...
+:loop
+python scripts\health_contract.py
+set EC=%ERRORLEVEL%
+if "%EC%"=="0" echo [HEALTH] OK
+if "%EC%"=="2" echo [HEALTH] WARN
+if "%EC%"=="4" echo [HEALTH] FAIL
+timeout /t %MTR_HEALTH_INTERVAL% /nobreak >nul
+goto loop

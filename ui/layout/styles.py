@@ -43,13 +43,21 @@ def apply_styles(app: Any, apply_neutral_dark: Optional[Callable[[ttk.Style], di
             "BadgeSafe.TLabel",
             background="#26a269",
             foreground="#0b0b0b",
+            borderwidth=1,
+            relief="solid",
             padding=(8, 2),
+            highlightthickness=1,
+            highlightbackground="#ffffff",
         )
         style.configure(
             "BadgeWarn.TLabel",
             background="#d0b343",
             foreground="#0b0b0b",
+            borderwidth=1,
+            relief="solid",
             padding=(8, 2),
+            highlightthickness=1,
+            highlightbackground="#ffffff",
         )
         style.configure(
             "BadgeDanger.TLabel",
@@ -67,6 +75,21 @@ def apply_styles(app: Any, apply_neutral_dark: Optional[Callable[[ttk.Style], di
     # Общие стили кнопок / полей
     style.configure("Dark.TButton", padding=6)
     style.map("Dark.TButton", background=[("active", "#2a2f36")])
+
+    # --- AUTOSIM toggle styles (green=ON, red=OFF ---
+    style.configure("AutosimOff.TButton", padding=6)
+    style.map(
+        "AutosimOff.TButton",      
+        background=[("!disabled", "#e01b24"), ("active", "#b3161d")],
+        foreground=[("!disabled", "#0b0b0b")],
+    )
+
+    style.configure("AutosimOn.TButton", padding=6)
+    style.map(
+        "AutosimOn.TButton",
+        background=[("!disabled", "#26a269"), ("active", "#1f8a5c")],
+        foreground=[("!disabled", "#0b0b0b")],
+    )
 
     style.configure("Log.TFrame", background="#121417")
     style.configure(

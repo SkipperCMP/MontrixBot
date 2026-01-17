@@ -8,7 +8,23 @@ from typing import Any, Optional, Dict
 import json
 import os
 import time
+import logging
+from core import heartbeats as hb
 
+log = logging.getLogger(__name__)
+_LOG_THROTTLE: Dict[str, float] = {}
+
+def _log_throttled(key: str, level: str, msg: str, *, interval_s: float = 60.0, exc_info: bool = False) -> None:
+    try:
+        now = time.time()
+        last = float(_LOG_THROTTLE.get(key, 0.0) or 0.0)
+        if (now - last) < float(interval_s):
+            return
+        _LOG_THROTTLE[key] = now
+        fn = getattr(log, level, log.warning)
+        fn(msg, exc_info=exc_info)
+    except Exception:
+        return
 
 JOURNAL_PATH_DEFAULT = "runtime/trades.jsonl"
 
@@ -41,7 +57,13 @@ def _append_jsonl(path: str, event: Dict[str, Any]) -> None:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
     except Exception:
         # журнал — вспомогательный, не должен ронять поток
-        pass
+        _log_throttled(
+            "executor.append_jsonl",
+            "warning",
+            f"trades journal write failed: {path}",
+            interval_s=60.0,
+            exc_info=True,
+        )
 
 
 @dataclass
@@ -80,12 +102,19 @@ class OrderExecutor:
 
         if m == "REAL":
             try:
-                from core.panic_tools import is_panic_active
+                from core.panic_facade import is_panic_active
                 from tools.safe_lock import is_safe_on
                 if bool(is_panic_active()) or bool(is_safe_on()):
                     self.mode = "SIM"
                     return
             except Exception:
+                _log_throttled(
+                    "executor.set_mode.real_gate",
+                    "warning",
+                    "REAL requested but SAFE/PANIC gate check failed; forcing SIM",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
                 self.mode = "SIM"
                 return
 
@@ -100,7 +129,13 @@ class OrderExecutor:
                 t = getattr(self.state, "tickers", {}).get(symbol) or {}
                 return float(t.get("last") or t.get("price") or 0.0)
         except Exception:
-            pass
+            _log_throttled(
+                "executor.last_price",
+                "debug",
+                f"_last_price failed for {symbol}",
+                interval_s=60.0,
+                exc_info=True,
+            )
         return 0.0
 
     def _round_price_qty(self, price: float, qty: float) -> tuple[float, float]:
@@ -117,7 +152,14 @@ class OrderExecutor:
         _append_jsonl(self.journal_path, ev)
 
     # -------- API used by UIAPI --------
-    def preview_order(self, symbol: str, side: str, qty: float, price: Optional[float] = None, type_: str = "MARKET") -> Preview:
+    def preview_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        price: Optional[float] = None,
+        type_: str = "MARKET",
+    ) -> Preview:
         """Грубый preview: только округление цены/количества и базовая проверка qty>0.
 
         UIAPI вызывает это перед real/dry-run, чтобы показать округлённые значения.
@@ -127,34 +169,143 @@ class OrderExecutor:
         if price is None:
             price = self._last_price(symbol)
 
+        # Prefer exchange filters rounding if cache is available.
+        # Fallback: legacy 6-decimal rounding.
         rp, rq = self._round_price_qty(price, qty)
+        try:
+            from core.exchange_filters import validate as _xf_validate
+
+            ok, reason, info = _xf_validate(symbol=symbol, side=side, price=price, qty=qty)
+            if isinstance(info, dict):
+                rp = info.get("rounded_price", rp)
+                rq = info.get("rounded_qty", rq)
+            # If filters say it's invalid, reflect it in Preview
+            if not bool(ok):
+                return Preview(
+                    ok=False,
+                    reason=str(reason),
+                    info=f"side={side}, type={type_}",
+                    rounded_price=rp,
+                    rounded_qty=rq,
+                )
+        except Exception:
+            # filters cache is optional; ignore any failures
+            pass
+
         if rq <= 0:
             return Preview(ok=False, reason="qty<=0", info=f"side={side}", rounded_price=rp, rounded_qty=rq)
 
         info = f"side={side}, type={type_}"
         return Preview(ok=True, reason="", info=info, rounded_price=rp, rounded_qty=rq)
 
-    def place_order(self, symbol: str, side: str, qty: float, type_: str = "MARKET", price: Optional[float] = None) -> OrderResult:
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        type_: str = "MARKET",
+        price: Optional[float] = None,
+        safe_code: Optional[str] = None,
+        confirm_token: Optional[str] = None,
+        confirm_actor: Optional[str] = None,
+    ) -> OrderResult:
         """Основной вход для UIAPI и TPSLManager.
 
-        - Работает только в не-REAL режимах.
-        - Делает dry-run через core.orders.place_order.
+        - В SIM делает dry-run через core.orders.place_order.
+        - В REAL отправляет ордер через core.orders_real.place_order_real (manual only).
         - Пишет событие в trades.jsonl (SIM).
         """
-        _ensure_not_real(self.mode)
-        from core.orders import place_order as _place_order
-
+        hb.beat("exec")
+        # -------------------------------------------------------------------
+        # STEP 1.x GUARD
+        #
+        # Executor не принимает стратегические решения.
+        # В STEP 1.x любые автоматические entry/exit запрещены.
+        # Этот метод может быть вызван только:
+        # - из UI (manual / preview-confirmed)
+        # - из TPSL safety mechanisms
+        #
+        # Стратегическое автоматическое исполнение разрешается
+        # только на этапах rollout стратегий (STEP 1.6+).
+        # -------------------------------------------------------------------
         side = (side or "BUY").upper()
         qty = float(qty or 0.0)
         if price is None:
             price = self._last_price(symbol)
 
+        # Exchange filters (best-effort): round/validate using cached exchangeInfo.
+        # For REAL, orders_real will re-apply filters and Binance will validate too.
         rp, rq = self._round_price_qty(price, qty)
+        try:
+            from core.exchange_filters import validate as _xf_validate
 
-        # Вызов DRY-ордер-плейсера
-        raw = _place_order(side=side, symbol=symbol, price=rp, qty=rq, mode=self.mode)
+            ok, reason, info = _xf_validate(symbol=symbol, side=side, price=price, qty=qty)
+            if isinstance(info, dict):
+                rp = info.get("rounded_price", rp)
+                rq = info.get("rounded_qty", rq)
+            if self.mode != "REAL" and not bool(ok):
+                raw = {
+                    "status": "REJECTED",
+                    "reason": "EXCHANGE_FILTERS",
+                    "details": {"why": str(reason), **(info or {})},
+                    "mode": self.mode,
+                }
+                return OrderResult(price=float(rp or 0.0), qty=float(rq or 0.0), raw=raw)
+        except Exception:
+            pass
 
-        # Журнал
+        # --- EXECUTE (SIM/REAL) ---
+        if self.mode == "REAL":
+            # Manual Confirm Surface (v2.2.105+): executor must be confirm-aware.
+            #
+            # Important:
+            # - Executor must NOT auto-execute REAL actions.
+            # - If confirm_token is missing, return CONFIRM_REQUIRED (exit_code=2).
+            from core.risky_confirm import RiskyConfirmService
+
+            actor = (confirm_actor or "executor").strip() or "executor"
+            if not confirm_token:
+                sym = str(symbol).upper()
+                qty_f = float(rq or 0.0)
+
+                # Unify confirm command format across Executor & Autonomy:
+                # must be CLI-runnable and point to manual confirm surface scripts.
+                script = "real_buy_market.py" if side == "BUY" else "real_sell_market.py"
+                cmd_text = f"python scripts/{script} {sym} {qty_f} confirm=<token>"
+
+                pc = RiskyConfirmService().request(cmd_text=cmd_text, actor=actor)
+                raw = {
+                    "status": "CONFIRM_REQUIRED",
+                    "reason": "REAL_CONFIRM_REQUIRED",
+                    "mode": "REAL",
+                    "safe_code": safe_code,
+                    "confirm_token": pc.token,
+                    "confirm_actor": pc.actor,
+                    "confirm_expires_ts": pc.expires_ts,
+                    "confirm_cmd": pc.cmd,
+                    "exit_code": 2,
+                }
+                return OrderResult(price=float(rp or 0.0), qty=float(rq or 0.0), raw=raw)
+
+            from core.orders_real import place_order_real as _place_order_real
+
+            # For MARKET orders we do not force-send price to Binance.
+            send_price = float(rp) if (str(type_).upper() == "LIMIT" and rp is not None) else None
+            raw = _place_order_real(
+                symbol=str(symbol).upper(),
+                side=side,
+                type_=type_,
+                quantity=float(rq or 0.0),
+                price=send_price,
+                safe_code=safe_code,
+                confirm_token=confirm_token,
+                confirm_actor=actor,
+            )
+        else:
+            from core.orders import place_order as _place_order
+            raw = _place_order(side=side, symbol=symbol, price=rp, qty=rq, mode=self.mode)
+
+        # Журнал (SIM only)
         self._journal_trade(
             {
                 "type": "ORDER",
@@ -182,8 +333,13 @@ class OrderExecutor:
                     state.tradebook.close(symbol.upper(), rp, reason="SELL")
         except Exception:
             # журнал сделок не должен ломать Executor
-            pass
-
+            _log_throttled(
+                "executor.tradebook_update",
+                "debug",
+                "TradeBook update failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
         return OrderResult(price=rp, qty=rq, raw=raw)
 
     def buy_market(self, symbol: str, qty: float) -> OrderResult:
@@ -232,7 +388,13 @@ class OrderExecutor:
             if state is not None and hasattr(state, "tradebook") and state.tradebook is not None:
                 state.tradebook.close(symbol.upper(), rp, reason="PANIC")
         except Exception:
-            pass
+            _log_throttled(
+                "executor.tradebook_panic_close",
+                "debug",
+                "TradeBook close(PANIC) failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
         return OrderResult(price=rp, qty=rq, raw=raw)
 

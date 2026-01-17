@@ -130,6 +130,22 @@ def install_default_ui_subscribers(app: Any) -> None:
         except Exception:
             pass
 
+        # 5) portfolio dashboard (v2.3.1, read-only)
+        try:
+            pd = getattr(app, "portfolio_dashboard", None)
+            if pd is not None and hasattr(pd, "update_from_snapshot"):
+                pd.update_from_snapshot(snapshot)
+        except Exception:
+            pass
+
+        # 6) notifications panel (v2.3.6, read-only)
+        try:
+            np = getattr(app, "notifications_panel", None)
+            if np is not None and hasattr(np, "update_from_snapshot"):
+                np.update_from_snapshot(snapshot)
+        except Exception:
+            pass
+
         # 5) сюда же позже добавим подписчиков:
         #    - positions_panel (если решим переводить на события)
         #    - health/log/signal (EVT_HEALTH/EVT_LOG/EVT_SIGNAL)

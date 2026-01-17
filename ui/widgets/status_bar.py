@@ -72,6 +72,16 @@ class StatusBar:
         )
         self._lock_lbl.pack(side=tk.LEFT, padx=(4, 4), pady=4)
         self._lock_last_text: str = "LOCK: —"
+
+        # MAJOR-3B: component heartbeats (WS / TPSL / EXEC)
+        self._hb_lbl = ttk.Label(
+            self._frame,
+            text="WS: OFF | TPSL: OFF | EXEC: OFF",
+            style="Muted.TLabel",
+        )
+        self._hb_lbl.pack(side=tk.LEFT, padx=(8, 4), pady=4)
+        self._hb_last_text: str = "WS: OFF | TPSL: OFF | EXEC: OFF"
+
         ttk.Separator(self._frame, orient="vertical").pack(
             side=tk.LEFT,
             fill=tk.Y,
@@ -163,6 +173,65 @@ class StatusBar:
     def update_lag(self, seconds: float | int | None) -> None:
         """Старое имя метода для обратной совместимости."""
         self.set_lag(seconds)
+    # ------------ COMPONENT HEARTBEATS (WS / TPSL / EXEC) ---------------
+
+    def set_component_heartbeats(self, hb: Mapping[str, Any] | None) -> None:
+        """
+        hb ожидается в формате core.heartbeats.snapshot():
+            {"age_s": {"ws": 1.2, "tpsl": 0.8, "exec": 45.0}, ...}
+        """
+        try:
+            ages = {}
+            if isinstance(hb, Mapping):
+                ages_raw = hb.get("age_s")
+                if isinstance(ages_raw, Mapping):
+                    ages = dict(ages_raw)
+
+            ws_age = ages.get("ws")
+            tpsl_age = ages.get("tpsl")
+            exec_age = ages.get("exec")
+
+            def _fmt_ok_lag_dead(label: str, age: Any, ok_s: float, dead_s: float) -> str:
+                # OFF = heartbeat никогда не бился (age отсутствует/непарсится)
+                try:
+                    if age is None:
+                        return f"{label}: OFF"
+                    a = float(age)
+                except Exception:
+                    return f"{label}: OFF"
+
+                if a < ok_s:
+                    return f"{label}: OK {a:.1f}s"
+                if a < dead_s:
+                    return f"{label}: LAG {a:.1f}s"
+                return f"{label}: DEAD {a:.0f}s"
+
+            # пороги можно потом вынести в настройки, но сейчас делаем простые/понятные
+            ws_txt = _fmt_ok_lag_dead("WS", ws_age, ok_s=2.0, dead_s=15.0)
+            tpsl_txt = _fmt_ok_lag_dead("TPSL", tpsl_age, ok_s=2.0, dead_s=15.0)
+
+            # EXEC: это не цикл, поэтому “IDLE” — нормальная ситуация (не авария)
+            try:
+                if exec_age is None:
+                    exec_txt = "EXEC: OFF"
+                else:
+                    ea = float(exec_age)
+                    if ea < 2.0:
+                        exec_txt = f"EXEC: OK {ea:.1f}s"
+                    else:
+                        exec_txt = f"EXEC: IDLE {ea:.0f}s"
+            except Exception:
+                exec_txt = "EXEC: OFF"
+
+            txt = f"{ws_txt} | {tpsl_txt} | {exec_txt}"
+            if txt != getattr(self, "_hb_last_text", ""):
+                self._hb_lbl.configure(text=txt)
+                self._hb_last_text = txt
+        except tk.TclError:
+            return
+        except Exception:
+            # UI не должен падать из-за диагностики
+            return
 
     def set_stall(self, is_stall: bool) -> None:
         """
@@ -182,7 +251,12 @@ class StatusBar:
 
     # ------------ SAFE MODE -------------------------------------------
 
-    def set_safe_mode(self, safe_mode: Mapping[str, Any] | bool | None) -> None:
+    def set_safe_mode(
+        self,
+        safe_mode: Mapping[str, Any] | bool | None,
+        core_lag_s: float | None = None,
+        core_stall: bool | None = None,
+    ) -> None:
         """
         Отображает SAFE MODE (core-owned) по snapshot["safe_mode"].
 
@@ -201,6 +275,48 @@ class StatusBar:
         severity = ""
 
         if isinstance(safe_mode, Mapping):
+            # Если CORE SAFE отключён — показываем не SAFE, а freshness данных (DATA).
+            enabled = True
+            try:
+                enabled = bool(safe_mode.get("enabled", True))
+            except Exception:
+                enabled = True
+
+            if not enabled:
+                lag = None
+                try:
+                    if core_lag_s is not None:
+                        lag = float(core_lag_s)
+                except Exception:
+                    lag = None
+
+                stall = False
+                try:
+                    if core_stall is not None:
+                        stall = bool(core_stall)
+                except Exception:
+                    stall = False
+
+                if (lag is not None and lag >= 5.0) or stall:
+                    parts = []
+                    if lag is not None:
+                        parts.append(f"lag {lag:.0f}s")
+                    if stall:
+                        parts.append("stall")
+                    text = "DATA: STALE" + (f" | {' '.join(parts)}" if parts else "")
+                    style = "BadgeWarn.TLabel"
+                else:
+                    text = "DATA: OK"
+                    style = "BadgeSafe.TLabel"
+
+                self._safe_last_text = text
+                try:
+                    self._safe_lbl.configure(text=text, style=style)
+                except tk.TclError:
+                    return
+                return
+
+            # CORE SAFE включён — показываем SAFE как раньше
             try:
                 active = bool(safe_mode.get("active"))
             except Exception:
@@ -461,8 +577,11 @@ class StatusBar:
         try:
             if "safe_mode" in snapshot:
                 sm = snapshot.get("safe_mode")
-                self.set_safe_mode(sm)
-
+                self.set_safe_mode(
+                    sm,
+                    core_lag_s=snapshot.get("core_lag_s"),
+                    core_stall=snapshot.get("core_stall"),
+                )
                 lock_on = None
                 lock_err = ""
                 if isinstance(sm, Mapping):
@@ -474,6 +593,13 @@ class StatusBar:
                         lock_err = str(meta.get("safe_lock_error") or "")
 
                 self.set_safe_lock(lock_on if isinstance(lock_on, bool) else None, lock_err)
+        except Exception:
+            pass
+
+        # MAJOR-3B: component heartbeats
+        try:
+            if "heartbeats" in snapshot:
+                self.set_component_heartbeats(snapshot.get("heartbeats"))
         except Exception:
             pass
 

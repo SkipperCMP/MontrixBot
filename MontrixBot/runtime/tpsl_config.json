@@ -1,9 +1,0 @@
-{
-  "enabled": false,
-  "tp_pct": 0.03,
-  "sl_pct": 0.02,
-  "trail_pct": 0.015,
-  "trail_activation": 0.01,
-  "poll_ms": 800,
-  "dry": true
-}

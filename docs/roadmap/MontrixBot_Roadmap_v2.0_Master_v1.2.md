@@ -48,11 +48,8 @@ Assistant MUST:
 - обновлять Roadmap B после завершения,
 - сверяться с Extended при стратегических изменениях.
 
-## 0.9 Architecture Principles (Hard Rules)
-REAL is autonomous; must operate without SIM
-SIM is advisory only; cannot change REAL state (SafeMode, Strategy ON/OFF, Leadership)
-SIM/REAL logs & reports are strictly separated
-SIM is allowed to be silent
+
+
 
 <a name="montrixbot-roadmap-v2-0-master-v1-0"></a>
 # MontrixBot_Roadmap_v2.0_Master_v1.0
@@ -74,11 +71,6 @@ MontrixBot Roadmap v2.0 Extended Edition + STATUS
 Цель: полностью рабочий, стабильный торговый движок с UI, SIM, TPSL и риск-менеджментом.
 1.1 — Основа ядра — ACTIVE / 90% DONE
 ✔ SIM/REAL Engine — ACTIVE → стабильный
-✔ SIM Role: автономный Market Researcher (Scout) — PRINCIPLE
-широкий скан рынка + мульти-таймфреймы + несколько стратегий-линз
-SIM может “молчать”, если нет среды
-SIM не влияет на REAL; отчёты SIM/REAL строго раздельные
-REAL автономен и работает без SIM
 ✔ TPSL Loop v1 — ACTIVE / 80% готов
 ✔ State Engine + StateBinder — ACTIVE
 ✔ Executor (SIM/REAL) — ACTIVE
@@ -283,20 +275,6 @@ Built-in chat — LATER
 ## 1.4.3 — Time Integrity — MUST
 <a name="1-4-4-log-history-retention-must"></a>
 ## 1.4.4 — Log & History Retention — MUST
-## 1.4.5 — SafeMode Behavior & Policy (REAL vs SIM) — MUST
-REAL: stop decisions/trading on trigger; policy A/B; never auto-resume by default
-SIM: may continue research; mark “SIM under SafeMode”; never affects REAL
-Strict separation: logs/reports/analytics
-## 1.4.6 — SafeMode Recovery UX (Human Settings) — SHOULD
-UI: Recovery tab / presets / explanations “why”
-Manual Resume required for Policy A; optional auto-resume for Policy B under conditions
-## 1.4.7 — Runtime State Save & Recovery — MUST
-- Persist SafeMode state (ON/OFF + reason)
-- Persist Strategy state (ON/PAUSED)
-- Persist Trading gate (ENABLED/DISABLED)
-- Persist REAL vs SIM mode
-- State must survive restart / crash
-- Restore always starts in safe state (Strategy PAUSED)
 
 <a name="1-5-must-ui-polish"></a>
 # Этап 1.5 — MUST — UI Polish
@@ -372,13 +350,6 @@ Manual Resume required for Policy A; optional auto-resume for Policy B under con
 ## 1.11.3 — Cooldown — MUST
 <a name="1-11-4-copy-trading-sim-must"></a>
 ## 1.11.4 — Copy-Trading SIM — MUST
-## 1.11.5 — SIM Market Scout (All-Market Research) — MUST
-Universe scan (все пары, фильтры ликвидности/объёма/волатильности)
-Multi-TF analysis (M5/M15/H1/H4/D1)
-Strategy lenses (trend/breakout/mean-reversion etc.)
-Output = “Ideas Queue” (предложения для REAL), без автоторговли
-Rule: SIM can be silent
-Rule: SIM reports separated from REAL
 
 <a name="1-12-must-license-manager-v1"></a>
 # Этап 1.12 — MUST — License Manager v1
@@ -527,7 +498,6 @@ Rule: SIM reports separated from REAL
 ## 1.6.3 — Cooldown — NOT STARTED — MUST
 <a name="1-6-4-copy-trading-sim-not-started-must"></a>
 ## 1.6.4 — Copy-Trading SIM — NOT STARTED — MUST
-## 1.6.5 — SIM Market Scout (All-Market Research) — NOT STARTED — MUST
 
 <a name="1-7-must-license-manager"></a>
 # Этап 1.7 — MUST — License Manager

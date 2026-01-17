@@ -21,6 +21,25 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 from core.tradebook import TradeBook
 from core.safe_mode import SafeModeManager
+from core.health_api import get_health_snapshot_for_core
+
+import logging
+
+log = logging.getLogger(__name__)
+_LOG_THROTTLE: Dict[str, float] = {}
+
+def _log_throttled(key: str, level: str, msg: str, *, interval_s: float = 60.0, exc_info: bool = False) -> None:
+    try:
+        now = time.time()
+        last = float(_LOG_THROTTLE.get(key, 0.0) or 0.0)
+        if (now - last) < float(interval_s):
+            return
+        _LOG_THROTTLE[key] = now
+        fn = getattr(log, level, log.warning)
+        fn(msg, exc_info=exc_info)
+    except Exception:
+        # logging must never break core
+        return
 
 # ------ optional hooks: ipc_ticks ------
 
@@ -82,6 +101,14 @@ class StateEngine:
         # STEP1.4.2: core heartbeat (timestamp of last successful core tick)
         self._last_core_tick_ts: float = time.time()
         self._core_stall_threshold_s: float = 2.0
+
+        # STEP1.4.9A: SAFE-start guard (do not enter sticky SAFE before first real tick)
+        self._boot_ts: float = time.time()
+        self._has_seen_tick: bool = False
+
+        # Grace window: allow UI to boot + feeds to connect without forcing sticky SAFE.
+        # If no tick arrives after this window, SAFE may activate normally (stall/lag).
+        self._safe_startup_grace_s: float = 10.0
 
         # журнал сделок для UI (используется UIAPI/Executor)
         self.tradebook: TradeBook = TradeBook()
@@ -176,6 +203,25 @@ class StateEngine:
             core_lag_s = float(self.get_core_lag_s())
             core_stall = bool(self.detect_stall())
 
+            # STEP1.4.9A: SAFE-start guard
+            # Before the first tick, core_lag/core_stall are not actionable (feeds may not be connected yet).
+            try:
+                if not bool(getattr(self, "_has_seen_tick", False)):
+                    boot_ts = float(getattr(self, "_boot_ts", 0.0) or 0.0)
+                    grace_s = float(getattr(self, "_safe_startup_grace_s", 0.0) or 0.0)
+                    if boot_ts > 0.0 and grace_s > 0.0:
+                        if (time.time() - boot_ts) <= grace_s:
+                            core_lag_s = 0.0
+                            core_stall = False
+            except Exception:
+                _log_throttled(
+                    "snapshot.safe_start_guard",
+                    "warning",
+                    "snapshot: SAFE-start guard failed (ignored to keep snapshot alive)",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
+
             core_time_backwards = bool(getattr(self, "_core_time_backwards", False))
             core_time_backwards_delta_s = float(getattr(self, "_core_time_backwards_delta_s", 0.0) or 0.0)
             core_time_backwards_count = int(getattr(self, "_core_time_backwards_count", 0) or 0)
@@ -212,18 +258,24 @@ class StateEngine:
             prev_active = bool(getattr(self, "_safe_prev_active", False))
             if cur_active and not prev_active:
                 # edge: OFF -> ON
+                #
+                # IMPORTANT POLICY:
+                # We do NOT auto-enable SAFE_MODE hard-lock file here.
+                # HARD_LOCK must be explicit (PANIC / manual), not a side-effect of SAFE turning ON.
                 try:
-                    if _is_safe_on is not None and _enable_safe_lock is not None:
+                    if _is_safe_on is not None:
                         if bool(_is_safe_on()):
-                            # lock уже включён — это тоже OK
+                            # lock already enabled (explicit) — OK
                             self._safe_hard_lock_ok = True
                             self._safe_hard_lock_error = ""
                         else:
-                            _enable_safe_lock()
-                            self._safe_hard_lock_ok = True
-                            self._safe_hard_lock_error = ""
+                            # safe active, but no explicit hard-lock file (expected)
+                            self._safe_hard_lock_ok = False
+                            self._safe_hard_lock_error = "hard-lock not enabled (explicit only)"
+                    else:
+                        self._safe_hard_lock_ok = False
+                        self._safe_hard_lock_error = "safe_lock unavailable"
                 except Exception as e:
-                    # не даём упасть snapshot(), но фиксируем ошибку для UI/логов
                     self._safe_hard_lock_ok = False
                     self._safe_hard_lock_error = f"{type(e).__name__}: {e}"
 
@@ -277,6 +329,10 @@ class StateEngine:
                     ) or _sm
                 ))(sm),
 
+                "health": (lambda: (
+                    get_health_snapshot_for_core()
+                ))(),
+
                 # best-effort: журнал сделок для UI
                 "deals_rows": self.tradebook.export_rows(),
             }
@@ -299,6 +355,7 @@ class StateEngine:
         bid: Optional[float] = None,
         ask: Optional[float] = None,
         ts: Optional[float] = None,
+        write_stream: bool = True,
     ) -> int:
         """Обновить тик по символу и вернуть новый version.
 
@@ -315,6 +372,9 @@ class StateEngine:
 
         # STEP1.4.2: heartbeat — фиксируем момент последнего core tick
         self.mark_core_tick(now_ts)
+
+        # first real market tick received (unblocks SAFE-start guard)
+        self._has_seen_tick = True
 
         # нормализуем цены (если bid/ask не заданы — берём last)
         try:
@@ -338,19 +398,28 @@ class StateEngine:
             self.ticks[sym] = t
 
             # best-effort: пишем тик в ipc_ticks для UI
-            try:
-                _append_tick(
-                    {
-                        "symbol": sym,
-                        "price": t.last,
-                        "bid": t.bid,
-                        "ask": t.ask,
-                        "ts": t.ts,
-                    }
-                )
-            except Exception:
-                # график — вспомогательный, не должен ломать поток
-                pass
+            # ВАЖНО: при ingest из ticks_stream.jsonl ставим write_stream=False,
+            # чтобы не было эха (читатель -> upsert -> запись -> читатель -> ...)
+            if write_stream:
+                try:
+                    _append_tick(
+                        {
+                            "symbol": sym,
+                            "price": t.last,
+                            "bid": t.bid,
+                            "ask": t.ask,
+                            "ts": t.ts,
+                        }
+                    )
+                except Exception:
+                    # график — вспомогательный, не должен ломать поток
+                    _log_throttled(
+                        "ipc_ticks.append_tick",
+                        "debug",
+                        "ipc_ticks.append_tick failed (tick processed anyway)",
+                        interval_s=60.0,
+                        exc_info=True,
+                    )
 
             self.version += 1
             new_version = self.version
@@ -362,7 +431,13 @@ class StateEngine:
                 self.tpsl.on_price(sym, float(last_f), now_ts)  # type: ignore[call-arg]
             except Exception:
                 # TP/SL не должен ронять основной поток тиков
-                pass
+                _log_throttled(
+                    "tpsl.on_price",
+                    "warning",
+                    "TPSLManager.on_price failed (tick loop continues)",
+                    interval_s=30.0,
+                    exc_info=True,
+                )
 
         return new_version
         
@@ -374,7 +449,13 @@ class StateEngine:
         try:
             self._check_time_integrity(ts_s)
         except Exception:
-            pass
+            _log_throttled(
+                "core.time_integrity",
+                "warning",
+                "core time integrity check failed (heartbeat continues)",
+                interval_s=60.0,
+                exc_info=True,
+            )
         self._last_core_tick_ts = ts_s
 
     def get_core_lag_s(self, now: Optional[float] = None) -> float:

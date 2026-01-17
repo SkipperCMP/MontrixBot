@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,19 @@ class AutoSimConfig:
     # максимально допустимое количество одновременно открытых позиций
     max_open_positions: int = 1
 
+log = logging.getLogger("montrix.autosim")
+_log_throttle: dict[str, float] = {}
+
+def _log_throttled(key: str, msg: str, *, interval_s: float = 60.0) -> None:
+    try:
+        now = time.time()
+        last = _log_throttle.get(key, 0.0)
+        if now - last < interval_s:
+            return
+        _log_throttle[key] = now
+        log.exception(msg)
+    except Exception:
+        return
 
 # ---------------------------------------------------------------------------
 #  Внутренний движок
@@ -49,6 +63,7 @@ class AutoSimEngine:
         try:
             self._day_index: int = int(self._now() // 86400)
         except Exception:
+            log.warning("autosim: failed to init day index; defaulting to 0")
             self._day_index = 0
         self.day_start_equity: float = float(self.equity)
 
@@ -86,7 +101,7 @@ class AutoSimEngine:
                     pos.get("qty", 0.0) or 0.0
                 )
             except Exception:
-                pass
+                _log_throttled("recalc_equity_pos", "autosim: failed to recalc equity for position")
         self.equity = float(eq)
 
         # если наступил новый день (UTC) — обновляем точку старта дня
@@ -105,8 +120,9 @@ class AutoSimEngine:
                     # фиксируем equity на начало нового дня
                     self.day_start_equity = float(self.equity)
         except Exception:
+            _log_throttled("day_rollover", "autosim: failed day rollover update")
             # в случае любой ошибки не ломаем симулятор
-            pass
+            return
 
     # ----------------- позиция -----------------
 
@@ -200,7 +216,8 @@ class AutoSimEngine:
                 if new_sl > sl_price:
                     pos["sl"] = new_sl
         except Exception:
-            pass
+            _log_throttled("trail_sl", "autosim: trailing SL update failed")
+            return
 
     def _close_position(
         self,
@@ -259,8 +276,7 @@ class AutoSimEngine:
         try:
             self.active_positions.remove(pos)
         except ValueError:
-            pass
-
+            log.debug("autosim: position already removed from active_positions")
         self._recalc_equity()
 
     # ----------------- основная точка входа -----------------
@@ -348,12 +364,14 @@ class AutoSimEngine:
             eq = float(self.equity)
             eq0 = float(self.config.initial_equity) if self.config.initial_equity else None
         except Exception:
+            _log_throttled("eq_cast", "autosim: failed to cast equity/initial_equity")
             eq = self.equity
             eq0 = None
 
         try:
             day_start = float(self.day_start_equity)
         except Exception:
+            _log_throttled("day_start_cast", "autosim: failed to cast day_start_equity")
             day_start = None
 
         # общий PnL от initial_equity
@@ -361,6 +379,7 @@ class AutoSimEngine:
             try:
                 portfolio["pnl_total_pct"] = (eq - eq0) / eq0 * 100.0
             except Exception:
+                _log_throttled("pnl_total", "autosim: failed to compute pnl_total_pct")
                 portfolio["pnl_total_pct"] = 0.0
 
         # дневной PnL от equity на начало дня
@@ -368,6 +387,7 @@ class AutoSimEngine:
             try:
                 portfolio["pnl_day_pct"] = (eq - day_start) / day_start * 100.0
             except Exception:
+                _log_throttled("pnl_day", "autosim: failed to compute pnl_day_pct")
                 portfolio["pnl_day_pct"] = 0.0
 
         snapshot_active: List[Dict[str, Any]] = []
@@ -425,6 +445,7 @@ class AutoSimFromSignals:
         try:
             self.initial_equity: float = float(self.config.initial_equity)
         except Exception:
+            log.warning("autosim: initial_equity is not float-castable; keeping raw value")
             self.initial_equity = self.config.initial_equity
 
     def process(

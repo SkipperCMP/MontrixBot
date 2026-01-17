@@ -10,16 +10,39 @@ from tkinter import ttk
 def build_topbar_ui(app: Any, symbols: Sequence[str]) -> None:
     """Строит верхнюю панель управления.
 
-    Лево: Symbol / Qty / BUY / Close / Panic / Mode / SAFE / Dry-Run.
+    Лево: Read-Only banner / Symbol / SAFE / Dry-Run.
     Право: индикаторы Signal / Recommendation / MACD / RSI.
+
+    MontrixBot v2.2.90 — UI Read-Only Hardening (No Action Surface):
+    - Убраны все кнопки/переключатели, которые выглядят как управление торговлей
+      (BUY, Close, Panic, Mode SIM/REAL).
+    - SAFE и Dry-Run остаются только как индикаторы (без кликов).
     """
 
     top = ttk.Frame(app, style="Dark.TFrame")
     top.pack(fill="x", padx=8, pady=6)
 
-    # --- левый блок: Symbol + Qty + кнопки ---
+    # --- левый блок: Read-Only banner + Symbol + индикаторы ---
     left_box = ttk.Frame(top, style="Dark.TFrame")
     left_box.pack(side="left", padx=(4, 4))
+
+    # READ-ONLY banner
+    ttk.Label(
+        left_box,
+        text="UI: READ-ONLY",
+        style="Muted.TLabel",
+    ).pack(side="left", padx=(0, 12))
+
+    # AUTOSIM toggle (SIM-only). This does not control REAL and does not place orders.
+    # It only starts/stops the local AUTOSIM loop for SIM diagnostics.
+    toggle_cmd = getattr(app, "_cmd_autosim_toggle", None) or (lambda: None)
+    app.btn_autosim_toggle = ttk.Button(
+        left_box,
+        text="START",
+        style="AutosimOff.TButton",
+        command=toggle_cmd,
+    )
+    app.btn_autosim_toggle.pack(side="left", padx=(0, 12))
 
     lbl_sym = ttk.Label(left_box, text="Symbol:", style="Dark.TLabel")
     lbl_sym.pack(side="left", padx=(0, 4))
@@ -37,146 +60,359 @@ def build_topbar_ui(app: Any, symbols: Sequence[str]) -> None:
     )
     app.cmb_symbol.pack(side="left", padx=(0, 8))
 
-    lbl_qty = ttk.Label(left_box, text="Qty:", style="Dark.TLabel")
-    lbl_qty.pack(side="left", padx=(0, 4))
+    # NOTE: Qty / BUY / Close / Panic / Mode removed in v2.2.90 (read-only hardening)
 
-    if not hasattr(app, "var_qty"):
-        app.var_qty = tk.StringVar(value="0.0")
-    app.entry_qty = ttk.Entry(
+    # --- бейдж SAFE (fixed size, white border via wrapper) ---
+    badge_safe_wrap = tk.Frame(
         left_box,
-        textvariable=app.var_qty,
-        width=10,
-        style="EntryDark.TEntry",
+        bg="#ffffff",
+        highlightthickness=0,
+        bd=0,
+        width=54,
+        height=24,
     )
-    app.entry_qty.pack(side="left", padx=(0, 8))
+    badge_safe_wrap.pack_propagate(False)
+    badge_safe_wrap.pack(side="left", padx=(6, 6), pady=(0, 0))
 
-    # --- кнопки BUY / Close / Panic ---
-    buy_cmd = getattr(app, "on_buy_sim", None) or (lambda: None)
-    close_cmd = getattr(app, "on_close_sim", None) or (lambda: None)
-    panic_cmd = getattr(app, "on_panic", None) or (lambda: None)
-
-    app.btn_buy = ttk.Button(
-        left_box,
-        text="BUY",
-        style="Dark.TButton",
-        command=buy_cmd,
-    )
-    app.btn_buy.pack(side="left", padx=2)
-
-    app.btn_close = ttk.Button(
-        left_box,
-        text="Close",
-        style="Dark.TButton",
-        command=close_cmd,
-    )
-    app.btn_close.pack(side="left", padx=2)
-
-    app.btn_panic = ttk.Button(
-        left_box,
-        text="Panic",
-        style="Dark.TButton",
-        command=panic_cmd,
-    )
-    app.btn_panic.pack(side="left", padx=2)
-
-    # --- переключатель SIM/REAL ---
-    if not hasattr(app, "_mode"):
-        app._mode = "SIM"
-
-    if not hasattr(app, "var_mode"):
-        app.var_mode = tk.StringVar(value=f"Mode: {app._mode}")
-
-    toggle_mode_cmd = getattr(app, "_toggle_mode", None) or (lambda: None)
-    app.btn_mode = ttk.Button(
-        left_box,
-        textvariable=app.var_mode,
-        style="Dark.TButton",
-        command=toggle_mode_cmd,
-    )
-    app.btn_mode.pack(side="left", padx=(8, 4))
-
-    # --- бейдж SAFE ---
     badge_safe = ttk.Label(
-        left_box,
+        badge_safe_wrap,
         text="SAFE",
         style="BadgeSafe.TLabel",
-        cursor="hand2",
+        width=7,
+        anchor="center",
     )
-    badge_safe.pack(side="left", padx=(4, 4))
-    if hasattr(app, "_toggle_safe"):
-        badge_safe.bind("<Button-1>", lambda e: app._toggle_safe())
+    badge_safe.pack(padx=1, pady=1, fill="both", expand=True)
+    # read-only: no click bindings
+
     app.badge_safe = badge_safe
 
-    # --- бейдж Dry-Run / REAL CLI ---
-    badge_dry = ttk.Label(
+    # --- бейдж Dry-Run / REAL CLI (fixed size, white border via wrapper) ---
+    badge_dry_wrap = tk.Frame(
         left_box,
+        bg="#ffffff",
+        highlightthickness=0,
+        bd=0,
+        width=72,
+        height=24,
+    )
+    badge_dry_wrap.pack_propagate(False)
+    badge_dry_wrap.pack(side="left", padx=(0, 6), pady=(0, 0))
+
+    badge_dry = ttk.Label(
+        badge_dry_wrap,
         text="Dry-Run",
         style="BadgeWarn.TLabel",
-        cursor="hand2",
+        width=9,
+        anchor="center",
     )
-    badge_dry.pack(side="left", padx=(0, 4))
-    if hasattr(app, "_toggle_dry"):
-        badge_dry.bind("<Button-1>", lambda e: app._toggle_dry())
+    badge_dry.pack(padx=1, pady=1, fill="both", expand=True)
+    # read-only: no click bindings
     app.badge_dry = badge_dry
 
-    # --- правый блок: сигналы / индикаторы ---
-    right_box = ttk.Frame(top, style="Dark.TFrame")
-    right_box.pack(side="right", padx=(4, 4))
+    # --- read-only trading status (FSM + policy) ---
+    if not hasattr(app, "var_trade_status"):
+        app.var_trade_status = tk.StringVar(value="FSM: n/a")
 
-    app.label_reco = ttk.Label(
-        right_box,
-        text="Recommendation: n/a",
-        style="Muted.TLabel",
+    # --- read-only explainability line for START/STOP + SIM/REAL + SAFE ---
+    if not hasattr(app, "var_trade_explain"):
+        app.var_trade_explain = tk.StringVar(value="AUTOSIM: n/a")
+
+    # --- chart timeframe (Candles v2) ---
+    if not hasattr(app, "var_chart_timeframe"):
+        app.var_chart_timeframe = tk.StringVar(value="1m")
+
+    # Статус переносим в ОТДЕЛЬНУЮ строку под кнопками.
+    status_row = ttk.Frame(app, style="Dark.TFrame")
+    status_row.pack(fill="x", padx=8, pady=(0, 6))
+
+    # LEFT: explainability (ties START/STOP to mode & safety indicators)
+    left_box = ttk.Frame(status_row, style="Dark.TFrame")
+    left_box.pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+    lbl_trade_explain = ttk.Label(
+        left_box,
+        textvariable=app.var_trade_explain,
+        style="Dark.TLabel",
+        justify="left",
+        anchor="w",
     )
-    app.label_reco.pack(side="right", padx=(4, 0))
+    app.lbl_trade_explain = lbl_trade_explain
+    app.lbl_trade_explain.pack(side="left", fill="x", expand=True)
 
-    app.label_signal = ttk.Label(
+    # RIGHT: existing status line (FSM/MODE/age/reason/gate)
+    right_box = ttk.Frame(status_row, style="Dark.TFrame")
+    right_box.pack(side="right", fill="x", expand=True, padx=(4, 4))
+
+    lbl_trade_status = ttk.Label(
         right_box,
-        text="Signal: n/a",
-        style="Muted.TLabel",
+        textvariable=app.var_trade_status,
+        style="Dark.TLabel",
+        justify="left",
+        anchor="e",
     )
-    app.label_signal.pack(side="right", padx=(4, 0))
+    app.lbl_trade_status = lbl_trade_status
+    app.lbl_trade_status.pack(side="right", fill="x", expand=True)
 
-    app.label_macd = ttk.Label(
-        right_box,
-        text="MACD: n/a",
-        style="Muted.TLabel",
+    # Wrap по ширине status_row, чтобы весь текст влезал (переносился).
+    def _sync_status_wrap(event=None):
+        try:
+            wl = left_box.winfo_width()
+            if wl and wl > 50:
+                app.lbl_trade_explain.configure(wraplength=max(50, wl - 10))
+        except Exception:
+            pass
+        try:
+            wr = right_box.winfo_width()
+            if wr and wr > 50:
+                # небольшой запас, чтобы не липло к краям
+                app.lbl_trade_status.configure(wraplength=max(50, wr - 10))
+        except Exception:
+            pass
+
+    left_box.bind("<Configure>", _sync_status_wrap)
+    right_box.bind("<Configure>", _sync_status_wrap)
+    _sync_status_wrap()
+
+    # --- Explain panel (read-only) — WHY_NOT + GATE_LAST (collapsible) ---
+    if not hasattr(app, "var_explain_panel"):
+        app.var_explain_panel = tk.StringVar(value="")
+
+    if not hasattr(app, "_explain_collapsed"):
+        app._explain_collapsed = True
+
+    if not hasattr(app, "var_explain_toggle"):
+        app.var_explain_toggle = tk.StringVar(value="Explain ▸")
+
+    explain_wrap = ttk.Frame(app, style="Dark.TFrame")
+    explain_wrap.pack(fill="x", padx=8, pady=(0, 6))
+
+    explain_head = ttk.Frame(explain_wrap, style="Dark.TFrame")
+    explain_head.pack(fill="x")
+
+    def _apply_explain_collapse_state():
+        try:
+            collapsed = bool(getattr(app, "_explain_collapsed", True))
+        except Exception:
+            collapsed = True
+
+        try:
+            app.var_explain_toggle.set("Explain ▸" if collapsed else "Explain ▾")
+        except Exception:
+            pass
+
+        try:
+            if collapsed:
+                explain_body.pack_forget()
+            else:
+                explain_body.pack(fill="x", pady=(2, 0))
+        except Exception:
+            pass
+
+    def _toggle_explain_panel():
+        try:
+            app._explain_collapsed = not bool(getattr(app, "_explain_collapsed", True))
+        except Exception:
+            app._explain_collapsed = True
+        _apply_explain_collapse_state()
+
+    btn_explain = ttk.Button(
+        explain_head,
+        textvariable=app.var_explain_toggle,
+        style="Dark.TButton",
+        command=_toggle_explain_panel,
     )
-    app.label_macd.pack(side="right", padx=(4, 0))
+    btn_explain.pack(side="left")
 
-    app.label_rsi = ttk.Label(
-        right_box,
-        text="RSI: n/a",
+    explain_body = ttk.Frame(explain_wrap, style="Dark.TFrame")
+
+    lbl_explain = ttk.Label(
+        explain_body,
+        textvariable=app.var_explain_panel,
         style="Muted.TLabel",
+        justify="left",
+        anchor="w",
     )
-    app.label_rsi.pack(side="right", padx=(4, 0))
+    app.lbl_explain = lbl_explain
+    app.lbl_explain.pack(side="left", fill="x", expand=True, padx=(4, 4))
 
+    def _sync_explain_wrap(event=None):
+        try:
+            w = explain_wrap.winfo_width()
+            if w and w > 50:
+                app.lbl_explain.configure(wraplength=max(50, w - 10))
+        except Exception:
+            pass
 
-def build_paths_ui(app: Any, journal_file: Path, runtime_dir: Path) -> None:
-    """Строит вторую строку с кнопками открытия журналов / runtime / графиков."""
+    explain_wrap.bind("<Configure>", _sync_explain_wrap)
+    _sync_explain_wrap()
+
+    _apply_explain_collapse_state()
+
+    # --- Event spine peek (read-only) — UX: collapse + scroll ---
+    # keep var for backward compatibility / fallback
+    if not hasattr(app, "var_event_spine"):
+        app.var_event_spine = tk.StringVar(value="events: unavailable")
+
+    # collapsed by default to avoid pushing the whole UI down
+    if not hasattr(app, "_events_collapsed"):
+        app._events_collapsed = True
+
+    events_wrap = ttk.Frame(app, style="Dark.TFrame")
+    events_wrap.pack(fill="x", padx=8, pady=(0, 8))
+
+    # header row: toggle + optional short label
+    events_head = ttk.Frame(events_wrap, style="Dark.TFrame")
+    events_head.pack(fill="x")
+
+    if not hasattr(app, "var_events_toggle"):
+        app.var_events_toggle = tk.StringVar(value="Events ▸")
+
+    def _apply_events_collapse_state():
+        try:
+            collapsed = bool(getattr(app, "_events_collapsed", True))
+        except Exception:
+            collapsed = True
+
+        try:
+            app.var_events_toggle.set("Events ▸" if collapsed else "Events ▾")
+        except Exception:
+            pass
+
+        try:
+            if collapsed:
+                events_body.pack_forget()
+            else:
+                events_body.pack(fill="x", pady=(2, 0))
+        except Exception:
+            pass
+
+    def _toggle_events_panel():
+        try:
+            app._events_collapsed = not bool(getattr(app, "_events_collapsed", True))
+            app._events_suppressed = False  # explicit user intent → allow redraw
+        except Exception:
+            app._events_collapsed = True
+        _apply_events_collapse_state()
+
+    btn_events = ttk.Button(
+        events_head,
+        textvariable=app.var_events_toggle,
+        style="Dark.TButton",
+        command=_toggle_events_panel,
+    )
+    btn_events.pack(side="left", padx=(0, 8))
+
+    # events view controls (read-only)
+    if not hasattr(app, "var_events_count"):
+        app.var_events_count = tk.StringVar(value="(0)")
+
+    if not hasattr(app, "_events_autoscroll"):
+        app._events_autoscroll = False
+    if not hasattr(app, "_events_suppressed"):
+        app._events_suppressed = False
+    lbl_events_count = ttk.Label(
+        events_head,
+        textvariable=app.var_events_count,
+        style="Dark.TLabel",
+    )
+    lbl_events_count.pack(side="left", padx=(0, 8))
+
+    def _toggle_events_autoscroll():
+        try:
+            app._events_autoscroll = not bool(getattr(app, "_events_autoscroll", False))
+            app.var_events_autoscroll.set("Auto ▾" if app._events_autoscroll else "Auto ▸")
+        except Exception:
+            pass
+
+    if not hasattr(app, "var_events_autoscroll"):
+        app.var_events_autoscroll = tk.StringVar(
+            value="Auto ▸" if not app._events_autoscroll else "Auto ▾"
+        )
+
+    btn_autoscroll = ttk.Button(
+        events_head,
+        textvariable=app.var_events_autoscroll,
+        style="Dark.TButton",
+        command=_toggle_events_autoscroll,
+    )
+    btn_autoscroll.pack(side="left", padx=(0, 8))
+
+    def _clear_events_view():
+        try:
+            app._events_suppressed = True  # suppress redraws until user action
+
+            txt = getattr(app, "txt_events", None)
+            if txt is not None:
+                try:
+                    txt.configure(state="normal")
+                except Exception:
+                    pass
+                try:
+                    txt.delete("1.0", "end")
+                except Exception:
+                    pass
+                try:
+                    txt.configure(state="disabled")
+                except Exception:
+                    pass
+
+            if hasattr(app, "var_events_count"):
+                app.var_events_count.set("(0)")
+        except Exception:
+            pass
+    btn_clear_events = ttk.Button(
+        events_head,
+        text="Clear",
+        style="Dark.TButton",
+        command=_clear_events_view,
+    )
+    btn_clear_events.pack(side="left")
+
+    # body row: scrollable text (monospace-ish via default, no heavy styling)
+    events_body = ttk.Frame(events_wrap, style="Dark.TFrame")
+
+    txt = tk.Text(
+        events_body,
+        height=4,
+        wrap="none",
+        borderwidth=0,
+        highlightthickness=0,
+    )
+    # keep UI robust even if theme differs
+    try:
+        txt.configure(state="disabled")
+    except Exception:
+        pass
+
+    yscroll = ttk.Scrollbar(events_body, orient="vertical", command=txt.yview)
+    txt.configure(yscrollcommand=yscroll.set)
+
+    txt.pack(side="left", fill="x", expand=True)
+    yscroll.pack(side="right", fill="y")
+
+    # expose widget for app_ui refresh
+    app.txt_events = txt
+
+    _apply_events_collapse_state()
+
+def build_paths_ui(app: Any) -> None:
+    """Строит вторую строку с кнопками открытия журналов / data / графиков."""
 
     box = ttk.Frame(app, style="Dark.TFrame")
     box.pack(fill="x", padx=8, pady=(0, 8))
 
     ttk.Button(
         box,
-        text="Open Journal (trades.jsonl)",
-        style="Dark.TButton",
-        command=lambda: app._open_path(journal_file),
-    ).pack(side="left", padx=4)
-
-    ttk.Button(
-        box,
-        text="Open Journal (viewer)",
+        text="Open Journal",
         style="Dark.TButton",
         command=app._cmd_open_trades,
     ).pack(side="left", padx=4)
 
     ttk.Button(
         box,
-        text="Open runtime folder",
+        text="SIM Journal",
         style="Dark.TButton",
-        command=lambda: app._open_path(runtime_dir),
+        command=app._cmd_open_sim_journal,
     ).pack(side="left", padx=4)
 
     ttk.Button(
@@ -188,14 +424,26 @@ def build_paths_ui(app: Any, journal_file: Path, runtime_dir: Path) -> None:
 
     ttk.Button(
         box,
-        text="Open RSI Chart (demo)",
-        style="Dark.TButton",
-        command=app._open_rsi_chart,
-    ).pack(side="left", padx=4)
-
-    ttk.Button(
-        box,
         text="Open LIVE Chart",
         style="Dark.TButton",
         command=app._open_rsi_live_chart,
+    ).pack(side="left", padx=4)
+
+    # Candles v2 (read-only): timeframe + open button
+    ttk.Label(box, text="TF:", style="Dark.TLabel").pack(side="left", padx=(12, 4))
+
+    tf = ttk.Combobox(
+        box,
+        textvariable=app.var_chart_timeframe,
+        values=("Tick", "1m", "5m", "15m", "1h"),
+        width=5,
+        state="readonly",
+    )
+    tf.pack(side="left", padx=4)
+
+    ttk.Button(
+        box,
+        text="Open LIVE Candles",
+        style="Dark.TButton",
+        command=app._open_candles_live_chart,
     ).pack(side="left", padx=4)

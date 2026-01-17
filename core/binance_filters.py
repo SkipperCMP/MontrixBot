@@ -1,11 +1,26 @@
 
 from __future__ import annotations
-import json, os, math
+import json, os, math, time, logging
 from dataclasses import dataclass
 from typing import Optional, Any
 
 RUNTIME_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "runtime"))
 EXCHANGE_INFO = os.path.join(RUNTIME_DIR, "exchange_info.json")
+
+log = logging.getLogger("montrix.binance_filters")
+_log_throttle: dict[str, float] = {}
+
+def _log_throttled(key: str, msg: str, *, interval_s: float = 60.0) -> None:
+    try:
+        now = time.time()
+        last = _log_throttle.get(key, 0.0)
+        if now - last < interval_s:
+            return
+        _log_throttle[key] = now
+        log.exception(msg)
+    except Exception:
+        # logging must never break core
+        return
 
 @dataclass
 class SymbolFilters:
@@ -30,7 +45,7 @@ def _read_json(path: str) -> Any:
             try:
                 return json.loads(lines[-1])
             except Exception:
-                pass
+                _log_throttled("read_json_jsonl_tail", "binance_filters: failed to parse JSONL-like tail")
         return json.loads(txt)
 
 def _ensure_exchange_info_for(symbol: str) -> dict:

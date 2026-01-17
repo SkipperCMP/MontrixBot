@@ -22,6 +22,19 @@ from runtime.sim_state_tools import load_sim_state, save_sim_state, clear_sim_st
 
 logger = logging.getLogger(__name__)
 
+_LOG_THROTTLE = {}
+
+def _log_throttled(key: str, msg: str, *, interval_s: float = 60.0):
+    try:
+        now = time.time()
+        last = _LOG_THROTTLE.get(key, 0.0)
+        if now - last < interval_s:
+            return
+        _LOG_THROTTLE[key] = now
+        logger.exception(msg)
+    except Exception:
+        return
+
 # Путь к основному state.json (позиции, метаданные и т.п.)
 STATE_PATH = os.path.join("runtime", "state.json")
 
@@ -79,8 +92,11 @@ def _ensure_base_structure(data: Dict[str, Any]) -> Dict[str, Any]:
             meta["last_boot"] = {}
         data["meta"] = meta
     except Exception:
-        # best-effort only
-        pass
+        _log_throttled(
+            "runtime_state.ensure_base_structure",
+            "runtime_state: failed to ensure meta recovery fields",
+            interval_s=300.0,
+        )
 
     # sim: гарантируем dict, но не создаём его из мусора
     sim = data.get("sim")
@@ -112,19 +128,11 @@ def load_runtime_state() -> Dict[str, Any]:
     и возвращает минимально валидную структуру.
     """
     # 1) базовое состояние из state.json через StateManager
+    # IMPORTANT: read must be side-effect free (UI read-only + test stability).
     try:
-        base: Dict[str, Any] = {}
-
-        def _capture(current: Dict[str, Any]) -> Dict[str, Any]:
-            nonlocal base
-            if isinstance(current, dict):
-                base = dict(current)
-            else:
-                base = {}
-            # ничего не меняем в файле
-            return current
-
-        _state_manager.update(_capture)
+        base = _state_manager.read()
+        if not isinstance(base, dict):
+            base = {}
     except Exception:
         logger.exception("runtime_state: failed to read base state via StateManager")
         base = {}
@@ -203,8 +211,11 @@ def reset_sim_state() -> None:
     try:
         clear_sim_state()
     except Exception:
-        # Логируем, но не выбрасываем наружу: сброс SIM не критичен.
-        logger.exception("runtime_state: failed to clear sim_state.json")
+        _log_throttled(
+            "runtime_state.reset_sim",
+            "runtime_state: failed to clear sim_state.json",
+            interval_s=120.0,
+        )
 
 def _detect_boot_conditions() -> Dict[str, Any]:
     """
@@ -302,6 +313,11 @@ def ensure_safe_boot_contract_persisted() -> Dict[str, Any]:
     try:
         return load_runtime_state()
     except Exception:
+        _log_throttled(
+            "runtime_state.safe_boot.return",
+            "runtime_state: failed to reload runtime state after safe boot persist",
+            interval_s=120.0,
+        )
         return {}
 
 def compute_trading_gate(state: dict) -> str:

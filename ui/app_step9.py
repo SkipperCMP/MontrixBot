@@ -705,14 +705,6 @@ class App(tk.Tk):
             # статус-бар не должен ломать основной UI
             pass
 
-        # --- HealthPanel update (UI isolation: snapshot-driven) ---
-        try:
-            hp = getattr(self, "health_panel", None)
-            if hp is not None and hasattr(hp, "update_from_snapshot"):
-                hp.update_from_snapshot(snapshot)
-        except Exception:
-            pass
-
     def _on_reset_sim(self) -> None:
         """Reset SIM engine (best-effort) and clear Active position."""
         try:
@@ -938,12 +930,6 @@ class App(tk.Tk):
         if svc is None:
             return
         svc.refresh_from_core_snapshot()
-
-        # SAFE badge/policy is snapshot-driven (core-owned)
-        try:
-            self._refresh_safe_badge()
-        except Exception:
-            pass
 
     # ----------------------------------------------------- indicators I/O --
     def _load_chart_prices(self, max_points: int = 300) -> Tuple[List[int], List[float]]:
@@ -1211,7 +1197,7 @@ class App(tk.Tk):
                     rec["decision_side"] = decision.side
                     rec["decision_confidence"] = float(
                         getattr(decision, "confidence", 0.0) or 0.0
-                    )
+                )
                     rec["decision_reason"] = str(getattr(decision, "reason", ""))
 
                 except Exception:
@@ -1223,11 +1209,12 @@ class App(tk.Tk):
                     api2 = self._ensure_uiapi()
                     if api2 is not None and hasattr(api2, "append_recent_signal"):
                         api2.append_recent_signal(rec)
-                    # core-owned persistence (UI must not write signals.jsonl directly)
-                    if api2 is not None and hasattr(api2, "persist_signal_record"):
-                        api2.persist_signal_record(rec)
                 except Exception:
                     pass
+
+                SIGNALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with SIGNALS_FILE.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             except Exception:
                 pass
 
@@ -1369,7 +1356,11 @@ class App(tk.Tk):
                         except Exception:
                             pass
                             
-                        # StatusBar + Mini-Equity обновляются через EVT_SNAPSHOT (ui/events/subscribers.py)
+                        # обновляем статус-бар (режим + lag) после обработки сигнала и AUTOSIM
+                        try:
+                            self._update_status_bar(last_snapshot)
+                        except Exception:
+                            pass                          
                             
             except Exception as e:
                 self._log(f"[SIM] error: {e}")
@@ -1390,41 +1381,34 @@ class App(tk.Tk):
         лёгкий heatmap-режим по RSI, чтобы глазами ловить экстремумы.
         """
 
-        # Prefer UIAPI buffer (no direct runtime file reads from UI)
-        records: list[dict] = []
+        if not SIGNALS_FILE.exists():
+            messagebox.showinfo(
+                "Signals",
+                f"No signals file found at:\n{SIGNALS_FILE}",
+            )
+            return
+
         try:
-            api = self._ensure_uiapi()
-            if api is not None and hasattr(api, "get_recent_signals_tail"):
-                records = api.get_recent_signals_tail(limit=500) or []
-        except Exception:
-            records = []
+            with SIGNALS_FILE.open("r", encoding="utf-8") as f:
+                # берём только последний хвост, чтобы окно не разрасталось
+                lines = f.readlines()[-500:]
+        except Exception as exc:
+            messagebox.showerror(
+                "Signals", f"Failed to read signals file:\n{exc}"
+            )
+            return
 
-        # Fallback (legacy): read runtime/signals.jsonl if UIAPI has nothing
-        if not records:
-            if not SIGNALS_FILE.exists():
-                messagebox.showinfo(
-                    "Signals",
-                    f"No signals history yet.\nExpected file:\n{SIGNALS_FILE}",
-                )
-                return
-
+        records: list[dict] = []
+        for raw in lines:
+            raw = raw.strip()
+            if not raw:
+                continue
             try:
-                with SIGNALS_FILE.open("r", encoding="utf-8") as f:
-                    lines = f.readlines()[-500:]
-            except Exception as exc:
-                messagebox.showerror("Signals", f"Failed to read signals file:\n{exc}")
-                return
-
-            for raw in lines:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    obj = json.loads(raw)
-                except Exception:
-                    continue
-                if isinstance(obj, dict):
-                    records.append(obj)
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
 
         if not records:
             messagebox.showinfo("Signals", "No signals to display yet.")
@@ -2199,12 +2183,6 @@ class App(tk.Tk):
             messagebox.showerror(tag, str(e))
 
     def on_buy_real(self) -> None:
-        if self._safe_is_on():
-            messagebox.showinfo(
-                "Buy", "SAFE is ON — REAL orders are blocked by policy"
-            )
-            return
-
         sym = self.var_symbol.get().strip()
         qty = self.var_qty.get().strip() or "0"
         try:

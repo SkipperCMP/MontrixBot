@@ -28,12 +28,27 @@ class PositionsController:
             return None
 
     def update_from_snapshot(self, snapshot: dict) -> None:
-        """Update Active position panel.
-
-        1) Пытаемся взять позиции из ядра (UIAPI.get_state_snapshot -> positions + ticks).
-        2) Если там пусто/ошибка — используем snapshot["active"] от AUTOSIM, как раньше.
         """
+        Update Active Position panel.
 
+        CONTRACT (input snapshot):
+        - snapshot: dict
+          - snapshot["active"]: Optional[list[dict]]
+              AUTOSIM fallback positions (legacy path).
+
+        CORE PATH (preferred):
+        - UIAPI.get_state_snapshot() -> dict with:
+            - "positions": dict[symbol -> position]
+            - "ticks": dict[symbol -> { "last": float }]
+
+        SELECTION RULE:
+        - core positions are used if present
+        - otherwise AUTOSIM snapshot["active"] is used
+
+        OUTPUT:
+        - formatted text table passed to App._set_active_text()
+        - controller MUST NOT raise; failures are best-effort
+        """
         # --- базовый active от AUTOSIM (старое поведение) ---
         try:
             autosim_active = snapshot.get("active") or []

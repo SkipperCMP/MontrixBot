@@ -18,14 +18,3 @@ def set_window_title(root, version: str = "MontrixBot 1.2-pre2 — Preview"):
     except Exception:
         # In preview hooks we never want to crash the UI just because of title
         pass
-
-
-def open_runtime_folder():
-    import os, sys, subprocess
-    path = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'runtime'))
-    if sys.platform.startswith("win"):
-        os.startfile(path)
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", path])
-    else:
-        subprocess.Popen(["xdg-open", path])

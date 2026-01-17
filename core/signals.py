@@ -12,11 +12,42 @@ core.signals
         "macd_sig":float,   # последнее валидное значение сигнальной линии MACD
     }
 """
+# ---------------------------------------------------------------------------
+# CANONICAL NOTICE (STEP 1.x)
+#
+# Signals в данном модуле являются ИНФРАСТРУКТУРНЫМИ индикативными сигналами.
+#
+# В рамках STEP 1.x:
+# - signals НЕ являются торговыми стратегиями;
+# - signals НЕ являются торговыми решениями;
+# - signals НЕ имеют права инициировать открытие или закрытие позиций;
+# - signals используются только как входные наблюдения (context / hints).
+#
+# Исполнение сделок и стратегический decision-making
+# запрещены до соответствующих этапов Master Roadmap.
+# ---------------------------------------------------------------------------
 
 from __future__ import annotations
 from typing import Iterable, Dict, Any, Optional
 from dataclasses import dataclass
 import math
+
+import logging
+import time
+
+log = logging.getLogger("montrix.signals")
+_log_throttle: dict[str, float] = {}
+
+def _log_throttled(key: str, msg: str, *, interval_s: float = 60.0) -> None:
+    try:
+        now = time.time()
+        last = _log_throttle.get(key, 0.0)
+        if now - last < interval_s:
+            return
+        _log_throttle[key] = now
+        log.exception(msg)
+    except Exception:
+        return
 
 from filters.filter_chain import FilterChain
 from config.filters_config import DEFAULT_FILTERS  # type: ignore
@@ -26,6 +57,7 @@ try:
     _DEFAULT_FILTER_CHAIN: Optional[FilterChain]
     _DEFAULT_FILTER_CHAIN = FilterChain.from_config(DEFAULT_FILTERS)
 except Exception:
+    _log_throttled("filters_init", "signals: failed to init DEFAULT filter chain")
     _DEFAULT_FILTER_CHAIN = None
 
 
@@ -70,6 +102,7 @@ def _apply_filters_for_signal(
     try:
         return chain.apply_all(context)
     except Exception:
+        _log_throttled("filters_apply", "signals: filter_chain.apply_all failed")
         # любые проблемы с фильтрами не должны ломать сигналы
         return True
 
@@ -236,6 +269,7 @@ def simple_rsi_macd_signal(
 
     macd_val = _norm(macd_last)
     macd_sig_val = _norm(macd_signal_last)
+    rsi_val = float(rsi_last)
 
     data = simple_rsi_macd(
         rsi_series=[rsi_last],
@@ -268,9 +302,17 @@ def simple_rsi_macd_signal(
                 data["reason"] = tag
             data["side"] = "HOLD"
     except Exception:
+        _log_throttled("signal_filters", "signals: post-filter application failed (keeping base data)")
         # Любые проблемы с фильтрами не должны ломать сигналы.
         # В таком случае просто используем исходный data.
-        pass
+        return SimpleSignal(
+            side=str(data.get("side", "HOLD")),
+            reason=str(data.get("reason", "")),
+            rsi=float(data.get("rsi", float("nan"))),
+            macd=float(data.get("macd", float("nan"))),
+            macd_signal=float(data.get("macd_sig", float("nan"))),
+            strength=float(data.get("strength", 0.0)),
+        )
 
     return SimpleSignal(
         side=str(data.get("side", "HOLD")),

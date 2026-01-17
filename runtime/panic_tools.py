@@ -10,6 +10,19 @@ from tools.safe_lock import enable_safe
 SETTINGS_PATH = os.path.join("runtime", "settings.json")
 PANIC_FLAG = os.path.join("runtime", "panic.flag")
 
+def _try_delegate_panic_to_core(reason: str) -> bool:
+    """
+    Try to delegate PANIC activation to core-owned policy.
+
+    Returns True if delegation succeeded, False otherwise.
+    """
+    try:
+        # Preferred: core-owned entrypoint (to be implemented/confirmed)
+        from core.safe_mode import request_panic  # type: ignore
+        request_panic(reason=reason)
+        return True
+    except Exception:
+        return False
 
 def _load_settings() -> Dict[str, Any]:
     """Безопасное чтение runtime/settings.json.
@@ -40,6 +53,12 @@ def activate_panic(reason: str = "panic") -> None:
     - создаёт файл runtime/panic.flag для других процессов.
     Плюс по возможности выключает TPSL-автолооп в этом процессе.
     """
+
+    # 0) First: delegate to core-owned PANIC policy, if available.
+    # This makes runtime a thin trigger (no policy decisions here).
+    if _try_delegate_panic_to_core(reason):
+        return
+
     # 1) включаем SAFE_MODE для REAL
     enable_safe()
 
@@ -69,7 +88,7 @@ def activate_panic(reason: str = "panic") -> None:
 
     # 4) если TPSL-луп запущен в этом же процессе — попробуем его остановить
     try:
-        from runtime import tpsl_loop  # type: ignore
+        from core import tpsl_loop  # type: ignore
         if hasattr(tpsl_loop, "stop"):
             tpsl_loop.stop()  # type: ignore[arg-type]
     except Exception:

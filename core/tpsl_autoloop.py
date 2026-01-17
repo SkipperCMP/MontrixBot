@@ -1,5 +1,6 @@
 from __future__ import annotations
 import time, threading, math
+from core import heartbeats as hb
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
@@ -59,10 +60,12 @@ class TpslAutoLoop:
         base = self._cfg.interval_sec
         while not self._stop.is_set():
             try:
+                hb.beat("tpsl")
                 self._tick()
                 backoff = 1
                 time.sleep(base)
             except Exception as e:
+                hb.beat("tpsl")
                 self._pm.log(f"[TPSL] Exception: {e}. Backoff {backoff}s")
                 time.sleep(min(60, backoff))
                 backoff = min(60, backoff * 2)

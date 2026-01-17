@@ -1,10 +1,27 @@
 from __future__ import annotations
-import time, threading, json, os
+import time, threading, json, os, math
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Literal, Iterable
 
 from core.executor import OrderExecutor
 from core.history_retention import apply_retention_for_key
+
+import logging
+
+log = logging.getLogger(__name__)
+_LOG_THROTTLE: Dict[str, float] = {}
+
+def _log_throttled(key: str, level: str, msg: str, *, interval_s: float = 60.0, exc_info: bool = False) -> None:
+    try:
+        now = time.time()
+        last = float(_LOG_THROTTLE.get(key, 0.0) or 0.0)
+        if (now - last) < interval_s:
+            return
+        _LOG_THROTTLE[key] = now
+        fn = getattr(log, level, log.warning)
+        fn(msg, exc_info=exc_info)
+    except Exception:
+        return
 
 Side = Literal["LONG","SHORT"]
 
@@ -14,6 +31,15 @@ class TPSSLConfig:
     stop_loss_pct: float = 0.01
     trail_activate_pct: float = 0.015
     trail_step_pct: float = 0.005
+
+    # v1.2.0 — Dynamic SL (wired into TPSLManager autoloop)
+    dynamic_sl_enabled: bool = True
+    dynamic_vol_window: int = 30              # rolling window of prices
+    dynamic_neutral_vol_pct: float = 1.0      # ~1% realized vol => neutral multiplier
+    dynamic_step_min_pct: float = 0.002       # clamp for trail step
+    dynamic_step_max_pct: float = 0.020       # clamp for trail step
+    dynamic_mult_min: float = 0.5             # multiplier clamp
+    dynamic_mult_max: float = 2.0
 
 @dataclass
 class Position:
@@ -33,13 +59,20 @@ class TPSLManager:
         self.ex = executor
         self.cfg = config or TPSSLConfig()
         self._pos: Dict[str, Position] = {}
+        self._price_hist: Dict[str, list[float]] = {}
         self._lock = threading.RLock()
         self.journal_path = journal_path
         os.makedirs(os.path.dirname(journal_path), exist_ok=True)
         try:
             self.recover_from_journal()
         except Exception:
-            pass
+            _log_throttled(
+                "tpsl.recover",
+                "warning",
+                "TPSL: recover_from_journal failed (starting with empty state)",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
     def _journal(self, event: dict):
         try:
@@ -50,7 +83,13 @@ class TPSLManager:
             # STEP1.4.4: log retention (best-effort)
             apply_retention_for_key(self.journal_path, "trades_jsonl")
         except Exception:
-            pass
+            _log_throttled(
+                "tpsl.journal.write",
+                "warning",
+                f"TPSL: journal write failed ({self.journal_path})",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
     def _read_journal(self) -> Iterable[dict]:
         if not os.path.exists(self.journal_path):
@@ -65,10 +104,92 @@ class TPSLManager:
                     try:
                         out.append(json.loads(line))
                     except Exception:
+                        _log_throttled(
+                            "tpsl.journal.bad_line",
+                            "debug",
+                            "TPSL: bad journal line skipped",
+                            interval_s=120.0,
+                            exc_info=True,
+                        )
                         continue
         except Exception:
+            _log_throttled(
+                "tpsl.journal.read",
+                "warning",
+                f"TPSL: journal read failed ({self.journal_path})",
+                interval_s=60.0,
+                exc_info=True,
+            )
             return []
         return out
+
+    # ----------------- v1.2.0 Dynamic SL helpers -----------------
+
+    def _record_price(self, sym: str, last: float) -> None:
+        try:
+            s = str(sym or "").upper()
+            if not s:
+                return
+            v = float(last)
+        except Exception:
+            return
+
+        w = int(getattr(self.cfg, "dynamic_vol_window", 30) or 30)
+        w = max(5, min(500, w))
+        arr = self._price_hist.get(s)
+        if arr is None:
+            arr = []
+            self._price_hist[s] = arr
+        arr.append(v)
+        if len(arr) > w:
+            del arr[: len(arr) - w]
+
+    def _realized_vol_pct(self, sym: str) -> float:
+        arr = self._price_hist.get(str(sym or "").upper()) or []
+        if len(arr) < 6:
+            return 0.0
+
+        # realized vol approximation: stddev of pct returns (in %)
+        rets: list[float] = []
+        prev = float(arr[0])
+        for x in arr[1:]:
+            cur = float(x)
+            if prev > 0:
+                rets.append(((cur / prev) - 1.0) * 100.0)
+            prev = cur
+
+        if len(rets) < 5:
+            return 0.0
+
+        m = sum(rets) / float(len(rets))
+        var = 0.0
+        for r in rets:
+            d = (r - m)
+            var += d * d
+        var = var / float(max(1, (len(rets) - 1)))
+        return float(math.sqrt(var))
+
+    def _dynamic_trail_step_pct(self, sym: str) -> float:
+        base = float(getattr(self.cfg, "trail_step_pct", 0.005) or 0.005)
+
+        enabled = bool(getattr(self.cfg, "dynamic_sl_enabled", False))
+        if not enabled:
+            return max(0.0, base)
+
+        vol = self._realized_vol_pct(sym)
+        neutral = float(getattr(self.cfg, "dynamic_neutral_vol_pct", 1.0) or 1.0)
+        neutral = max(0.1, neutral)
+
+        mult = vol / neutral
+        mult_min = float(getattr(self.cfg, "dynamic_mult_min", 0.5) or 0.5)
+        mult_max = float(getattr(self.cfg, "dynamic_mult_max", 2.0) or 2.0)
+        mult = max(mult_min, min(mult_max, mult))
+
+        step = base * mult
+        lo = float(getattr(self.cfg, "dynamic_step_min_pct", 0.002) or 0.002)
+        hi = float(getattr(self.cfg, "dynamic_step_max_pct", 0.020) or 0.020)
+        step = max(lo, min(hi, step))
+        return max(0.0, float(step))
 
     def recover_from_journal(self):
         events = list(self._read_journal())
@@ -129,6 +250,10 @@ class TPSLManager:
             pos = self._pos.get(sym)
             if not pos:
                 return
+
+            # v1.2.0: Dynamic SL is driven by the same on_price autoloop (rolling vol)
+            self._record_price(sym, last)
+
             pos.last_ts = now
             if not pos.trailing_active:
                 if last >= pos.entry_price * (1.0 + self.cfg.trail_activate_pct):
@@ -137,8 +262,11 @@ class TPSLManager:
             if pos.trailing_active:
                 if last > pos.trail_anchor:
                     pos.trail_anchor = last
-                    pos.sl_price = max(pos.sl_price, pos.trail_anchor * (1.0 - self.cfg.trail_step_pct))
-                    pos.tp_price = max(pos.tp_price, pos.trail_anchor * (1.0 + self.cfg.trail_step_pct))
+
+                    step_pct = self._dynamic_trail_step_pct(sym)
+
+                    pos.sl_price = max(pos.sl_price, pos.trail_anchor * (1.0 - step_pct))
+                    pos.tp_price = max(pos.tp_price, pos.trail_anchor * (1.0 + step_pct))
             if last <= pos.sl_price:
                 to_close = True
                 reason = f"SL_hit({round((last/pos.entry_price-1)*100,2)}%)"

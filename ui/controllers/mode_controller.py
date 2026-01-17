@@ -214,7 +214,12 @@ class ModeController:
     # --- Mode SIM / REAL --------------------------------------------------
 
     def set_mode(self, mode: str) -> None:
-        """Переключение режима UI: SIM или REAL."""
+        """Переключение режима UI: SIM или REAL.
+
+        MontrixBot v2.2.90+ может работать в режиме "No Action Surface",
+        когда кнопки BUY/CLOSE/MODE удалены из UI. В этом случае set_mode()
+        должен быть безопасным и НЕ пытаться перепривязывать команды.
+        """
         app = self.app
 
         mode = (mode or "SIM").upper()
@@ -223,15 +228,32 @@ class ModeController:
         if hasattr(app, "var_mode"):
             app.var_mode.set(f"Mode: {mode}")
 
-        # Перепривязываем команды кнопок в зависимости от режима
-        if mode == "SIM":
-            app.btn_buy.configure(command=app.on_buy_sim)
-            app.btn_close.configure(command=app.on_close_sim)
-        else:
-            app.btn_buy.configure(command=app.on_buy_real)
-            app.btn_close.configure(command=app.on_close_real)
+        # Action-surface может отсутствовать (v2.2.90 No Action Surface)
+        btn_buy = getattr(app, "btn_buy", None)
+        btn_close = getattr(app, "btn_close", None)
 
-        # После смены режима обновим SAFE-индикацию
+        # Перепривязываем команды только если кнопки реально существуют
+        if btn_buy is not None and btn_close is not None:
+            if mode == "SIM":
+                try:
+                    btn_buy.configure(command=app.on_buy_sim)
+                except Exception:
+                    pass
+                try:
+                    btn_close.configure(command=app.on_close_sim)
+                except Exception:
+                    pass
+            else:
+                try:
+                    btn_buy.configure(command=app.on_buy_real)
+                except Exception:
+                    pass
+                try:
+                    btn_close.configure(command=app.on_close_real)
+                except Exception:
+                    pass
+
+        # После смены режима обновим SAFE-индикацию (там уже best-effort try/except)
         try:
             self.refresh_safe_badge()
         except Exception:

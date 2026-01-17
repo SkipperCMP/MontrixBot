@@ -19,16 +19,15 @@ def _load_json(path: str) -> Optional[Dict[str, Any]]:
             data = json.load(f)
         return data if isinstance(data, dict) else None
     except Exception:
+        logger.exception("history_retention: failed to load json: %s", path)
         return None
-
 
 def load_history_retention_settings(settings_path: str = "runtime/settings.json") -> Dict[str, Any]:
     """
     Best-effort settings loader with tiny TTL cache.
     Returns dict like:
       {
-        "trades_jsonl": {"max_lines": 5000},
-        "health_log": {"max_lines": 2000}
+        "trades_jsonl": {"max_lines": 5000}
       }
     """
     now = time.time()
@@ -70,12 +69,13 @@ def _atomic_write_text(path: str, text: str) -> None:
             try:
                 os.remove(tmp_path)
             except Exception:
-                pass
+                logger.exception("history_retention: failed to remove tmp file: %s", tmp_path)
         if fd is not None:
             try:
                 os.close(fd)
             except Exception:
-                pass
+                logger.exception("history_retention: failed to close fd")
+
 
 
 def rotate_keep_last_lines(path: str, max_lines: int) -> bool:
@@ -87,6 +87,7 @@ def rotate_keep_last_lines(path: str, max_lines: int) -> bool:
     try:
         max_lines_i = int(max_lines)
     except Exception:
+        logger.exception("history_retention: invalid max_lines=%r for %s", max_lines, path)
         return False
 
     if max_lines_i <= 0:
@@ -96,12 +97,14 @@ def rotate_keep_last_lines(path: str, max_lines: int) -> bool:
         if not os.path.exists(path):
             return False
     except Exception:
+        logger.exception("history_retention: exists() check failed for %s", path)
         return False
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except Exception:
+        logger.exception("history_retention: failed to read file: %s", path)
         return False
 
     try:
@@ -111,16 +114,20 @@ def rotate_keep_last_lines(path: str, max_lines: int) -> bool:
         _atomic_write_text(path, "".join(trimmed))
         return True
     except Exception:
+        logger.exception("history_retention: rotate failed for %s", path)
         return False
 
 
 def apply_retention_for_key(file_path: str, key: str, settings_path: str = "runtime/settings.json") -> None:
     """
-    key: "trades_jsonl" | "health_log" (or any custom key)
+    key: "trades_jsonl" (health_log запрещён по POLICY-01)
     """
     try:
         hr = load_history_retention_settings(settings_path=settings_path)
         policy = hr.get(key)
+        if key == "health_log":
+            # POLICY-01: файловый health.log запрещён
+            return
         if not isinstance(policy, dict):
             return
         ml = policy.get("max_lines")
@@ -128,5 +135,6 @@ def apply_retention_for_key(file_path: str, key: str, settings_path: str = "runt
             return
         rotate_keep_last_lines(file_path, int(ml))
     except Exception:
-        # best-effort only
+        logger.exception("history_retention: apply_retention failed for key=%s file=%s", key, file_path)
         return
+

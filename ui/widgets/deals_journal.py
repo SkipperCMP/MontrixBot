@@ -48,13 +48,50 @@ class DealsJournal:
 
         ttk.Label(filt, text="Action").grid(row=0, column=4, padx=(0,4))
         self._act_var = tk.StringVar(value="Any")
-        act = ttk.Combobox(filt, textvariable=self._act_var, width=8, state="readonly",
-                           values=["Any","CLOSE","OPEN","TP","SL"])
+        act = ttk.Combobox(
+            filt,
+            textvariable=self._act_var,
+            width=8,
+            state="readonly",
+            values=["Any", "CLOSE", "OPEN", "TP", "SL"],
+        )
         act.grid(row=0, column=5, padx=(0,10))
         act.bind("<<ComboboxSelected>>", lambda _e: self._apply_filters())
 
+        # --- NEW: PnL / State filter ---
+        ttk.Label(filt, text="PnL").grid(row=0, column=6, padx=(0,4))
+        self._pnl_var = tk.StringVar(value="Any")
+        pnl = ttk.Combobox(
+            filt,
+            textvariable=self._pnl_var,
+            width=8,
+            state="readonly",
+            values=["Any", "Win", "Loss", "Active", "Closed"],
+        )
+        pnl.grid(row=0, column=7, padx=(0,10))
+        pnl.bind("<<ComboboxSelected>>", lambda _e: self._apply_filters())
+
+        # --- NEW: Date range filters (From/To) ---
+        ttk.Label(filt, text="From").grid(row=1, column=0, padx=(0,4), pady=(4,0), sticky="w")
+        self._from_var = tk.StringVar(value="")
+        frm = ttk.Entry(filt, textvariable=self._from_var, width=18)
+        frm.grid(row=1, column=1, padx=(0,10), pady=(4,0), sticky="w")
+        self._from_var.trace_add("write", lambda *_: self._apply_filters())
+
+        ttk.Label(filt, text="To").grid(row=1, column=2, padx=(0,4), pady=(4,0), sticky="w")
+        self._to_var = tk.StringVar(value="")
+        to = ttk.Entry(filt, textvariable=self._to_var, width=18)
+        to.grid(row=1, column=3, padx=(0,10), pady=(4,0), sticky="w")
+        self._to_var.trace_add("write", lambda *_: self._apply_filters())
+
+        ttk.Label(
+            filt,
+            text="(YYYY-MM-DD or YYYY-MM-DD HH:MM)",
+            foreground=GRAY,
+        ).grid(row=1, column=4, columnspan=3, padx=(0,10), pady=(4,0), sticky="w")
+
         self._clear_btn = ttk.Button(filt, text="Clear", command=self._clear_filters)
-        self._clear_btn.grid(row=0, column=6, padx=(0,0))
+        self._clear_btn.grid(row=0, column=8, padx=(0,0))
 
         # Summary + Heatmap + Export (right)
         self._sum_label = ttk.Label(
@@ -247,24 +284,128 @@ class DealsJournal:
         self._sym_var.set("")
         self._tier_var.set("Any")
         self._act_var.set("Any")
+        if hasattr(self, "_pnl_var"):
+            self._pnl_var.set("Any")
+        if hasattr(self, "_from_var"):
+            self._from_var.set("")
+        if hasattr(self, "_to_var"):
+            self._to_var.set("")
         self._apply_filters()
+
+    def _is_active_trade(self, r: dict) -> bool:
+        """Определяет активную (открытую) сделку по данным строки журнала."""
+        exit_val = r.get("exit")
+        if exit_val in (None, "", 0, "0"):
+            return True
+        action = str(r.get("action", "")).upper()
+        if action in ("OPEN", "OPEN_LONG", "OPEN_SHORT"):
+            return True
+        if action in ("BUY", "SELL") and "CLOSE" not in action:
+            return True
+        return False
+
+    def _parse_time_to_dt(self, v):
+        """Пытается распарсить time/ts в datetime (naive local), максимально терпимо."""
+        import datetime as _dt
+
+        if v is None or v == "":
+            return None
+
+        # epoch seconds/ms
+        try:
+            if isinstance(v, (int, float)):
+                x = float(v)
+                if x > 10_000_000_000:  # ms
+                    return _dt.datetime.fromtimestamp(x / 1000.0)
+                if x > 1_000_000_000:  # sec
+                    return _dt.datetime.fromtimestamp(x)
+        except Exception:
+            pass
+
+        s = str(v).strip()
+        if not s:
+            return None
+
+        # allow "Z"
+        s2 = s.replace("Z", "+00:00")
+
+        # try fromisoformat (supports YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, +00:00)
+        try:
+            return _dt.datetime.fromisoformat(s2)
+        except Exception:
+            pass
+
+        # common fallbacks
+        fmts = [
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+            "%d.%m.%Y %H:%M",
+            "%d.%m.%Y",
+        ]
+        for f in fmts:
+            try:
+                return _dt.datetime.strptime(s, f)
+            except Exception:
+                continue
+
+        return None
+
+    def _parse_filter_dt(self, s: str):
+        """Парсит значение фильтра From/To (YYYY-MM-DD или YYYY-MM-DD HH:MM)."""
+        return self._parse_time_to_dt(s)
 
     def _row_matches(self, r: dict) -> bool:
         # symbol filter (substring, case-insensitive)
         sflt = self._sym_var.get().strip().lower()
         if sflt:
-            if str(r.get("symbol","")).lower().find(sflt) == -1:
+            if str(r.get("symbol", "")).lower().find(sflt) == -1:
                 return False
+
         # tier filter
         tflt = self._tier_var.get()
         if tflt != "Any":
-            if str(r.get("tier","")) != tflt:
+            if str(r.get("tier", "")) != tflt:
                 return False
+
         # action filter
         aflt = self._act_var.get()
         if aflt != "Any":
-            if str(r.get("action","")).upper() != aflt.upper():
+            if str(r.get("action", "")).upper() != aflt.upper():
                 return False
+
+        # pnl/state filter
+        pflt = self._pnl_var.get() if hasattr(self, "_pnl_var") else "Any"
+        pnl_pct = _to_float(r.get("pnl_pct"))
+        is_active = self._is_active_trade(r)
+        if pflt == "Win":
+            if pnl_pct is None or pnl_pct <= 0:
+                return False
+        elif pflt == "Loss":
+            if pnl_pct is None or pnl_pct >= 0:
+                return False
+        elif pflt == "Active":
+            if not is_active:
+                return False
+        elif pflt == "Closed":
+            if is_active:
+                return False
+
+        # date range filter
+        if hasattr(self, "_from_var") and self._from_var.get().strip():
+            dt_from = self._parse_filter_dt(self._from_var.get().strip())
+            if dt_from is not None:
+                dt_row = self._parse_time_to_dt(r.get("time") or r.get("ts") or "")
+                if dt_row is None or dt_row < dt_from:
+                    return False
+
+        if hasattr(self, "_to_var") and self._to_var.get().strip():
+            dt_to = self._parse_filter_dt(self._to_var.get().strip())
+            if dt_to is not None:
+                dt_row = self._parse_time_to_dt(r.get("time") or r.get("ts") or "")
+                if dt_row is None or dt_row > dt_to:
+                    return False
+
         return True
 
     def _apply_filters(self):

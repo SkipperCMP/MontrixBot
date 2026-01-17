@@ -161,9 +161,30 @@ def main(argv=None):
     else:
         safe_code = safe_file
 
+    # Two-step manual confirm (v2.2.105):
+    confirm_token = None
+    for a in sys.argv[1:]:
+        if isinstance(a, str) and a.strip().lower().startswith("confirm="):
+            confirm_token = a.split("=", 1)[1].strip()
+
+    if not confirm_token:
+        from core.risky_confirm import RiskyConfirmService
+        cmd_text = f"/real_sell_market {symbol} qty={float(q)}"
+        pending = RiskyConfirmService().request(cmd_text, actor="local", ttl_s=60)
+        print("⚠️ Confirmation required.")
+        print(f"Repeat the SAME command with:\npython scripts/real_sell_market.py {symbol} {q} confirm={pending.token}")
+        raise SystemExit(2)
+
     # Place REAL SELL
     from core.orders_real import place_order_real
-    resp = place_order_real(symbol, "SELL", type_="MARKET", quantity=float(q), safe_code=safe_code)
+    resp = place_order_real(
+        symbol, "SELL",
+        type_="MARKET",
+        quantity=float(q),
+        safe_code=safe_code,
+        confirm_token=confirm_token,
+        confirm_actor="local",
+    )
     print(json.dumps(resp, ensure_ascii=False))
 
 if __name__ == "__main__":

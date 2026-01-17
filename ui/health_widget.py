@@ -36,7 +36,7 @@ class HealthPanel(ttk.Frame):
         self.tree = ttk.Treeview(self, columns=cols, show="headings", height=15)
         headers = {
             "ts": "Timestamp (UTC)",
-            "trades": "trades.jsonl",
+            "trades": "Journal",
             "open": "OPEN",
             "close": "CLOSE",
             "active": "Active symbols",

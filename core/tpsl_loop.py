@@ -10,7 +10,8 @@ import time, json, os, sys
 from datetime import datetime
 
 CFG = "runtime/tpsl_config.json"
-LOG = "runtime/health_log.jsonl"
+# POLICY-01: файловая health-телеметрия запрещена
+LOG = None
 
 def load_cfg():
     try:
@@ -20,10 +21,9 @@ def load_cfg():
         return {}
 
 def jlog(obj):
-    os.makedirs(os.path.dirname(LOG), exist_ok=True)
-    with open(LOG, "a", encoding="utf-8") as f:
-        obj["ts"] = datetime.utcnow().isoformat(timespec="seconds")+"Z"
-        f.write(json.dumps(obj, ensure_ascii=False)+"\n")
+    # POLICY-01: файловый health_log.jsonl запрещён
+    # Логирование TPSL отключено до 1.5.x
+    return
 
 def main():
     jlog({"tpsl":"start", "note":"scaffold"})

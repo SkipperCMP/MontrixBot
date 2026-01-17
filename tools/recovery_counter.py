@@ -1,5 +1,8 @@
 
 import os, time
+import logging
+
+log = logging.getLogger(__name__)
 
 FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'runtime', 'recovery_counter.txt'))
 STAMP = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'runtime', 'last_recovery.stamp'))
@@ -11,7 +14,8 @@ def increment() -> int:
         try:
             with open(FILE, "r", encoding="utf-8") as f:
                 n = int((f.read() or "0").strip())
-        except:
+        except Exception:
+            log.exception("RecoveryCounter: failed to read counter file %s", FILE)
             n = 0
     n += 1
     with open(FILE, "w", encoding="utf-8") as f:
@@ -24,9 +28,14 @@ def read() -> int:
     try:
         with open(FILE, "r", encoding="utf-8") as f:
             return int((f.read() or "0").strip())
-    except:
+    except Exception:
+        log.exception("RecoveryCounter: failed to read counter file %s", FILE)
         return 0
 
 def reset():
-    try: os.remove(FILE)
-    except: pass
+    try:
+        os.remove(FILE)
+    except FileNotFoundError:
+        return
+    except Exception:
+        log.exception("RecoveryCounter: failed to remove counter file %s", FILE)

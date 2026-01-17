@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os, time, hmac, hashlib, urllib.parse, urllib.request, json, threading
 from typing import Optional, Dict, Any
+from core.system_clock import SystemClock
 
 DEFAULT_BASE = os.environ.get("BINANCE_BASE", "https://api.binance.com")
 API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
@@ -27,8 +28,12 @@ class BinanceREST:
         url = self.base + path
         params = params or {}
         if signed:
-            params["timestamp"] = int(time.time() * 1000)
-            params["recvWindow"] = self.recv_window
+            params["timestamp"] = SystemClock.now_exchange_ms()
+
+            # v1.9.A: prefer explicit client/env recvWindow, fallback to persisted time_offset.json
+            rw = getattr(self, "recv_window", None)
+            params["recvWindow"] = int(rw) if rw is not None else SystemClock.recv_window_ms()
+
             qs = urllib.parse.urlencode(params, doseq=True)
             params["signature"] = self._sign(qs)
         data = None

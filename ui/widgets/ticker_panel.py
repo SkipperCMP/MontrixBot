@@ -2,6 +2,9 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 import time
+import logging
+
+log = logging.getLogger(__name__)
 
 THEME = {
     "bg": "#151719",
@@ -29,8 +32,10 @@ class LiveTickerPanel(ttk.Frame):
         self._order = []
         self._more_label = None
         style = ttk.Style(self)
-        try: style.theme_use(style.theme_use())
-        except Exception: pass
+        try:
+            style.theme_use(style.theme_use())
+        except Exception:
+            log.exception("TickerPanel: failed to apply ttk theme")
         style.configure("TickerPanel.TFrame", background=THEME["bg"])
         style.configure("Ticker.Tile.TFrame", background=THEME["tile"])
         style.map("Ticker.Tile.TFrame", background=[("active", THEME["tile_hover"])])
@@ -81,8 +86,10 @@ class LiveTickerPanel(ttk.Frame):
     def _remove_tile(self, s):
         w=self._items.pop(s,None)
         if w:
-            try: w["root"].destroy()
-            except Exception: pass
+            try:
+                w["root"].destroy()
+            except Exception:
+                log.exception("TickerPanel: failed to destroy tile widget")
 
     def _relayout(self):
         for idx,s in enumerate(self._order):
@@ -93,8 +100,10 @@ class LiveTickerPanel(ttk.Frame):
                 w["root"].pack(side=tk.LEFT, padx=4)
         hidden = max(0, len(self._order)-self.max_visible)
         if hasattr(self, "_more"): 
-            try: self._more.destroy()
-            except Exception: pass
+            try:
+                self._more.destroy()
+            except Exception:
+                log.exception("TickerPanel: failed to destroy '+more' badge")
             self._more=None
         if hidden>0:
             self._more = ttk.Label(self._tiles, text=f"+{hidden} more", style="Ticker.Badge.TLabel"); self._more.pack(side=tk.LEFT, padx=6)
@@ -144,15 +153,19 @@ class LiveTickerPanel(ttk.Frame):
         def mix(a,b,t): return int(a + (b-a)*t)
         def step(i=0):
             if i>steps:
-                try: widget.configure(style="Ticker.Tile.TFrame")
-                except Exception: pass
+                try:
+                    widget.configure(style="Ticker.Tile.TFrame")
+                except Exception:
+                    log.exception("TickerPanel: failed to reset fade style")
                 return
             k=i/steps
             rgb="#%04x%04x%04x"%(mix(start[0],end[0],k),mix(start[1],end[1],k),mix(start[2],end[2],k))
             name=f"__Fade{i}.TFrame"; st=ttk.Style(widget)
             try:
-                st.configure(name, background=rgb); widget.configure(style=name)
-            except Exception: pass
+                st.configure(name, background=rgb)
+                widget.configure(style=name)
+            except Exception:
+                log.exception("TickerPanel: failed during fade animation step")
             widget.after(30, lambda: step(i+1))
         step()
 
@@ -160,11 +173,22 @@ class LiveTickerPanel(ttk.Frame):
         base=THEME["text"]; tint=THEME["up"] if up else THEME["down"]
         st=ttk.Style(label)
         try:
-            st.configure("__P1.TLabel", foreground=tint); label.configure(style="__P1.TLabel")
-            label.after(80, lambda: (st.configure("Ticker.Price.TLabel", foreground=base), label.configure(style="Ticker.Price.TLabel")))
-        except Exception: pass
+            st.configure("__P1.TLabel", foreground=tint)
+            label.configure(style="__P1.TLabel")
+            label.after(
+                80,
+                lambda: (
+                    st.configure("Ticker.Price.TLabel", foreground=base),
+                    label.configure(style="Ticker.Price.TLabel"),
+                ),
+            )
+        except Exception:
+            log.exception("TickerPanel: failed during price pulse animation")
 
     def _click(self, s):
         if callable(self.on_symbol_click):
-            try: self.on_symbol_click(s)
-            except Exception: pass
+            try:
+                self.on_symbol_click(s)
+            except Exception:
+                log.exception("TickerPanel: on_symbol_click callback failed (%s)", s)
+

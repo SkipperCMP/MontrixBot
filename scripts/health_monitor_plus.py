@@ -1,35 +1,38 @@
 #!/usr/bin/env python3
-import time, json, subprocess, sys, os
-from datetime import datetime
+# scripts/health_monitor_plus.py
+# v2.2.104 — wrapper over Health Contract (snapshot-only; no file logs)
 
-os.makedirs("logs", exist_ok=True)
-JSONL = os.path.join("logs","health_24h.jsonl")
+import sys
+import time
+import subprocess
+import os
 
-def one_tick():
-    cmd = [sys.executable, os.path.join("scripts","health_monitor.py")]
+
+def one_tick() -> int:
+    cmd = [sys.executable, os.path.join("scripts", "health_contract.py")]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, timeout=300)
-        # try parse simple JSON dict from the output tail if present
-        text = out.strip().splitlines()
-        last = text[-1] if text else ""
-        payload = None
-        try:
-            payload = json.loads(last)
-        except Exception:
-            payload = {"raw": last}
-        payload.setdefault("ts", datetime.utcnow().isoformat()+"Z")
-        with open(JSONL,"a",encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False)+"\n")
-        print(last)
+        print(out.strip())
+        return 0
     except subprocess.CalledProcessError as e:
         print(e.output.strip())
+        return int(e.returncode or 1)
     except Exception as e:
         print(f"[HEALTH_PLUS] Exception: {e}")
+        return 1
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     if "--loop" in sys.argv:
+        interval = 60
+        try:
+            i = sys.argv.index("--interval")
+            interval = int(sys.argv[i + 1])
+        except Exception:
+            interval = int(os.environ.get("MTR_HEALTH_INTERVAL", "60") or "60")
+
         while True:
             one_tick()
-            time.sleep(60)
+            time.sleep(max(5, interval))
     else:
-        one_tick()
+        raise SystemExit(one_tick())

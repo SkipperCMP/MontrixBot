@@ -5,6 +5,24 @@ import time
 import ssl
 from typing import Iterable, Callable
 
+import logging
+from core import heartbeats as hb
+
+log = logging.getLogger(__name__)
+_LOG_THROTTLE = {}
+
+def _log_throttled(key: str, level: str, msg: str, *, interval_s: float = 60.0, exc_info: bool = False):
+    try:
+        now = time.time()
+        last = _LOG_THROTTLE.get(key, 0.0)
+        if now - last < interval_s:
+            return
+        _LOG_THROTTLE[key] = now
+        fn = getattr(log, level, log.warning)
+        fn(msg, exc_info=exc_info)
+    except Exception:
+        return
+
 try:
     import websocket  # type: ignore
 except Exception:
@@ -31,7 +49,13 @@ class BinanceMiniTickerThread(threading.Thread):
             try:
                 websocket.enableTrace(True)
             except Exception:
-                pass
+                _log_throttled(
+                    "binance_ws.trace",
+                    "debug",
+                    "BinanceWS: enableTrace failed",
+                    interval_s=300.0,
+                    exc_info=True,
+                )
         while not self._stop.is_set():
             try:
                 self._ws = websocket.WebSocketApp(
@@ -52,7 +76,13 @@ class BinanceMiniTickerThread(threading.Thread):
             if self._ws:
                 self._ws.close()
         except Exception:
-            pass
+            _log_throttled(
+                "binance_ws.stop",
+                "debug",
+                "BinanceWS: ws.close() failed during stop",
+                interval_s=120.0,
+                exc_info=True,
+            )
 
     # --- WS callbacks ---
     def _on_open(self, _ws):
@@ -70,7 +100,15 @@ class BinanceMiniTickerThread(threading.Thread):
         # Поэтому процент считаем сами, а если вдруг есть 'P' (на некоторых источниках) — используем его.
         try:
             arr = json.loads(message)
+            hb.beat("ws")
         except Exception:
+            _log_throttled(
+                "binance_ws.json",
+                "debug",
+                "BinanceWS: failed to decode JSON message",
+                interval_s=60.0,
+                exc_info=True,
+            )
             return
         if not isinstance(arr, list):
             return
@@ -89,4 +127,12 @@ class BinanceMiniTickerThread(threading.Thread):
                     pct = ((c - o) / o * 100.0) if o else 0.0
                 self.on_quote(s, c, pct)
             except Exception:
+                _log_throttled(
+                    "binance_ws.item",
+                    "debug",
+                    "BinanceWS: bad miniTicker item skipped",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
                 continue
+

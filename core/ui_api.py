@@ -4,6 +4,60 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 
 import time
+import threading
+import os
+import sys
+import json
+import subprocess
+from pathlib import Path
+
+import logging
+from core.candles import build_ohlc_from_ticks
+
+log = logging.getLogger(__name__)
+
+# UI forbidden actions registry (SSOT; best-effort import to avoid breaking core)
+try:
+    from core.ui_forbidden_actions import normalize_ui_action, describe_ui_action  # type: ignore
+except Exception:  # pragma: no cover
+    def normalize_ui_action(action: str) -> str:  # type: ignore
+        try:
+            s = str(action or "").strip()
+            return s if s else "UNKNOWN_ACTION"
+        except Exception:
+            return "UNKNOWN_ACTION"
+
+    def describe_ui_action(action: str) -> str:  # type: ignore
+        return normalize_ui_action(action)
+
+# Event spine (best-effort)
+try:
+    from core.event_bus import get_event_bus, make_event, new_cid
+except Exception:  # pragma: no cover
+    get_event_bus = None  # type: ignore
+    make_event = None  # type: ignore
+    new_cid = None  # type: ignore
+_LOG_THROTTLE: Dict[str, float] = {}
+
+try:
+    from tools.ipc_equity import append_equity_point as _append_equity_point  # type: ignore
+except Exception:  # pragma: no cover
+    _append_equity_point = None  # type: ignore
+
+def _log_throttled(key: str, level: str, msg: str, *, interval_s: float = 60.0, exc_info: bool = False) -> None:
+    """
+    Throttled logging helper: never raises, never breaks UI/core loop.
+    """
+    try:
+        now = time.time()
+        last = float(_LOG_THROTTLE.get(key, 0.0) or 0.0)
+        if (now - last) < float(interval_s):
+            return
+        _LOG_THROTTLE[key] = now
+        fn = getattr(log, level, log.warning)
+        fn(msg, exc_info=exc_info)
+    except Exception:
+        return
 
 from core.state_engine import StateEngine
 from core.executor import OrderExecutor, Preview
@@ -12,6 +66,7 @@ from core.state_binder import StateBinder
 from core.events import StateSnapshot
 from core.runtime_state import load_runtime_state, reset_sim_state
 from core.tpsl_settings_api import get_tpsl_settings, update_tpsl_settings
+from core import heartbeats as hb
 
 @dataclass
 class UIStatus:
@@ -20,6 +75,15 @@ class UIStatus:
     symbols: List[str]
     active_positions: Dict[str, dict]
 
+
+def _emit_event(event_type: str, payload: Dict[str, Any], *, actor: str = "ui", cid: str | None = None) -> None:
+    try:
+        if get_event_bus is None or make_event is None:
+            return
+        bus = get_event_bus()
+        bus.publish(make_event(event_type, payload, actor=actor, cid=cid))
+    except Exception:
+        return
 
 class UIAPI:
     """
@@ -48,17 +112,34 @@ class UIAPI:
 
         # текущий UI-режим
         self._ui_mode: str = "SIM"
-        
+
+        # UI hardening: по умолчанию UI работает в READ-ONLY режиме
+        # (любой write-action через UIAPI будет заблокирован)
+        # Override: MB_UI_READ_ONLY=0
+        self._ui_read_only: bool = str(os.environ.get("MB_UI_READ_ONLY", "1")).strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+
         # текущий выбранный символ из UI
         self._current_symbol: Optional[str] = None
 
         # последний advisor-snapshot (signal + recommendation + trend)
         self._advisor_snapshot: Dict[str, Any] = {}
-        
+
+        # последняя причина, почему ордер был заблокирован/упал (для UI explain)
+        self._last_order_error: Optional[str] = None
+
         # последние N сигналов/сделок для UI-журналов
         self._recent_signals: List[Dict[str, Any]] = []
         self._recent_trades: List[Dict[str, Any]] = []
         self._max_recent: int = 500
+
+        # market stats (24h high/low/volume/pct) — заполняется фидами best-effort
+        self._market_stats: Dict[str, Dict[str, Any]] = {}
+        self._market_stats_lock = threading.RLock()
 
         # StateBinder: единая точка сборки снапшота состояния ядра
         self._snapshot_version: int = 0
@@ -70,12 +151,155 @@ class UIAPI:
                 on_resync=None,
             )
         except Exception:
-            # если биндер недоступен, UIAPI продолжит работать по старой схеме
+            _log_throttled(
+                "uiapi.binder_init",
+                "warning",
+                "UIAPI: StateBinder init failed; falling back to legacy snapshot path",
+                interval_s=60.0,
+                exc_info=True,
+            )
             self._binder = None
 
         # STEP1.3.3: троттлинг для runtime-персистентности
         # (чтобы не писать state.json на каждый тик).
         self._last_runtime_persist_ts: float = 0.0
+
+        # UI READ-ONLY: smart suppression for repetitive blocked actions (UI-only)
+        # Goal: avoid spamming events.jsonl + Explain panel while preserving evidence.
+        # Window can be tuned: MB_UI_RO_SUPPRESS_WINDOW_S (default 3.0)
+        try:
+            self._ui_ro_suppress_window_s: float = float(
+                str(os.environ.get("MB_UI_RO_SUPPRESS_WINDOW_S", "3.0")).strip() or "3.0"
+            )
+        except Exception:
+            self._ui_ro_suppress_window_s = 3.0
+
+        # Per-action suppression state:
+        # { action: {"last_emit_ts": float, "suppressed": int, "first_suppressed_ts": float|None, "last_suppressed_ts": float|None } }
+        self._ui_ro_suppress: Dict[str, Dict[str, Any]] = {}
+
+    def get_last_order_error(self) -> Optional[str]:
+        """Последняя причина блокировки/ошибки ордера (для UI explain)."""
+        return self._last_order_error
+
+    # ==============================
+    #        UI READ-ONLY GUARD
+    # ==============================
+    def is_ui_read_only(self) -> bool:
+        return bool(getattr(self, "_ui_read_only", True))
+
+    def set_ui_read_only(self, value: bool) -> None:
+        self._ui_read_only = bool(value)
+
+    def _guard_write(self, action: str, details: Optional[Dict[str, Any]] = None) -> bool:
+        """Central write-guard for UIAPI.
+
+        If UI is read-only (default), any write action is blocked.
+        Override: MB_UI_READ_ONLY=0
+
+        Smart suppression:
+          - first block emits UI_READ_ONLY_BLOCK immediately
+          - repeated blocks of the same action within window are suppressed
+          - next emitted block carries suppressed_count + timestamps
+        """
+        if not self.is_ui_read_only():
+            return True
+
+        now = time.time()
+
+        # Normalize action via SSOT registry (never raises)
+        act = normalize_ui_action(action)
+        act_title = describe_ui_action(act)
+
+        # best-effort: store last error for diagnostics
+        try:
+            self._last_order_error = f"UI read-only: '{act}' blocked"
+        except Exception:
+            pass
+
+        # suppression state (best-effort)
+        try:
+            window_s = float(getattr(self, "_ui_ro_suppress_window_s", 3.0) or 3.0)
+        except Exception:
+            window_s = 3.0
+
+        st_map = getattr(self, "_ui_ro_suppress", None)
+        if not isinstance(st_map, dict):
+            st_map = {}
+            try:
+                self._ui_ro_suppress = st_map  # type: ignore
+            except Exception:
+                pass
+
+        rec = st_map.get(act)
+        if not isinstance(rec, dict):
+            rec = {"last_emit_ts": 0.0, "suppressed": 0, "first_suppressed_ts": None, "last_suppressed_ts": None}
+            st_map[act] = rec
+
+        last_emit = 0.0
+        try:
+            last_emit = float(rec.get("last_emit_ts") or 0.0)
+        except Exception:
+            last_emit = 0.0
+
+        # If within suppression window: do not emit event; just count
+        if (now - last_emit) < window_s:
+            try:
+                rec["suppressed"] = int(rec.get("suppressed") or 0) + 1
+            except Exception:
+                rec["suppressed"] = 1
+            if rec.get("first_suppressed_ts") is None:
+                rec["first_suppressed_ts"] = now
+            rec["last_suppressed_ts"] = now
+
+            _log_throttled(
+                "uiapi.read_only.suppressed",
+                "warning",
+                f"UIAPI: suppressed repeated read-only block '{act}'",
+                interval_s=30.0,
+            )
+            return False
+
+        # Window passed -> emit event (carrying suppressed summary, if any), then reset counters
+        suppressed_count = 0
+        first_sup = None
+        last_sup = None
+        try:
+            suppressed_count = int(rec.get("suppressed") or 0)
+        except Exception:
+            suppressed_count = 0
+        first_sup = rec.get("first_suppressed_ts")
+        last_sup = rec.get("last_suppressed_ts")
+
+        _emit_event(
+            "UI_READ_ONLY_BLOCK",
+            {
+                "action": str(act),
+                "action_title": str(act_title),
+                "original_action": str(action),
+                "details": details or {},
+                "mode": str(getattr(self, "_ui_mode", "-")),
+                "suppressed_count": int(suppressed_count),
+                "suppression_window_s": float(window_s),
+                "first_suppressed_ts": first_sup,
+                "last_suppressed_ts": last_sup,
+            },
+            actor="ui",
+        )
+
+        # update suppression record
+        rec["last_emit_ts"] = now
+        rec["suppressed"] = 0
+        rec["first_suppressed_ts"] = None
+        rec["last_suppressed_ts"] = None
+
+        _log_throttled(
+            "uiapi.read_only.block",
+            "warning",
+            f"UIAPI: blocked write action '{act}' (READ-ONLY)",
+            interval_s=30.0,
+        )
+        return False
 
     # ==============================
     #     УСТАНОВКА РЕЖИМА UI
@@ -91,14 +315,28 @@ class UIAPI:
             try:
                 self.executor.set_mode(mode)
             except Exception:
-                pass
+                _log_throttled(
+                    "uiapi.set_mode.executor",
+                    "warning",
+                    f"UIAPI: executor.set_mode({mode}) failed (ignored)",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
 
         # и в TPSL (если реализовано)
         if self.tpsl is not None and hasattr(self.tpsl, "set_mode"):
             try:
                 self.tpsl.set_mode(mode)
             except Exception:
-                pass
+                _log_throttled(
+                    "uiapi.set_mode.tpsl",
+                    "warning",
+                    f"UIAPI: tpsl.set_mode({mode}) failed (ignored)",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
+        _emit_event("MODE_SET", {"mode": self._ui_mode}, actor="ui")
+
 
     def get_mode(self) -> str:
         return self._ui_mode
@@ -144,6 +382,23 @@ class UIAPI:
             active_positions=positions,
         )
 
+    def get_trading_status(self) -> Dict[str, Any]:
+        """
+        STEP 2.0 — Status Surface (read-only):
+        canonical /status-like payload for UI (FSM + policy), no side effects.
+        """
+        try:
+            from core.autonomy_policy import AutonomyPolicyStore
+            from core.trading_state_machine import TradingStateMachine
+            from core.status_service import StatusService
+
+            policy = AutonomyPolicyStore()
+            fsm = TradingStateMachine()
+            svc = StatusService(policy, fsm)
+            return svc.build_status().to_dict()
+        except Exception as e:
+            return {"error": f"unavailable: {e!r}"}
+
     # ==============================
     #   TIME UTILS (STEP1.4.3)
     # ==============================
@@ -180,8 +435,13 @@ class UIAPI:
             if len(storage) > maxlen:
                 del storage[:-maxlen]
         except Exception:
-            # в худшем случае просто игнорируем ошибку
-            pass
+            _log_throttled(
+                "uiapi.append_bounded",
+                "debug",
+                "UIAPI: append_bounded failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
     def add_recent_signal(self, row: Dict[str, Any]) -> None:
         """Добавить запись в журнал сигналов (для UI)."""
@@ -200,29 +460,70 @@ class UIAPI:
         """
         Core-owned persistence for signals history.
         UI should NOT write runtime/signals.jsonl directly.
+
+        NOTE:
+        UIAPI must NOT do file I/O. Delegates to core.signal_store.
         """
         try:
-            from pathlib import Path
-            import json
-
-            root = Path(__file__).resolve().parents[1]
-            path = root / "runtime" / "signals.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            from core.signal_store import append_signal_record
+            append_signal_record(rec)
         except Exception:
-            # persistence must never crash UI/core loop
-            pass
+            # best-effort: never crash UI/core loop, but no silent fail
+            # (log here is optional; if you already have project-wide logging, keep it minimal)
+            try:
+                import logging
+                logging.getLogger(__name__).exception("UIAPI: persist_signal_record delegation failed")
+            except Exception:
+                # last resort: still avoid raising to UI
+                return
+
+    def persist_equity_point(self, snapshot: dict, source: str = "UI") -> None:
+        """
+        UI-safe: UI calls this, but the actual file I/O is done in tools/ipc_equity.py (runtime layer).
+        """
+        if not self._guard_write(
+            "persist_equity_point",
+            {
+                "source": str(source),
+                "mode": str(snapshot.get("mode") if isinstance(snapshot, dict) else "SIM"),
+            },
+        ):
+            return
+
+        if _append_equity_point is None:
+            _log_throttled(
+                "uiapi.equity_point.no_impl",
+                "warning",
+                "UIAPI: _append_equity_point not available (tools.ipc_equity missing?)",
+                interval_s=30.0,
+            )
+            return
+
+        try:
+            ts = float(snapshot.get("ts")) if isinstance(snapshot, dict) else time.time()
+        except Exception:
+            ts = time.time()
+
+        try:
+            eq = float(snapshot.get("equity")) if isinstance(snapshot, dict) else 0.0
+        except Exception:
+            eq = 0.0
+
+        try:
+            mode = snapshot.get("mode") if isinstance(snapshot, dict) else "SIM"
+        except Exception:
+            mode = "SIM"
+
+        _append_equity_point(ts=ts, equity=eq, mode=mode, source=source)
 
     def get_recent_signals_tail(self, limit: int = 500) -> list[dict]:
         """
         Prefer in-memory buffer; UI uses this for Signals window.
         """
         try:
-            buf = getattr(self, "recent_signals", None)
+            buf = getattr(self, "_recent_signals", None)
             if not buf:
                 return []
-            # buf can be list or deque
             items = list(buf)
             if limit and len(items) > limit:
                 items = items[-limit:]
@@ -250,8 +551,441 @@ class UIAPI:
             return []
 
     # ==============================
+    #   UI Runtime Isolation (HARD-1A)
+    #   UI must NOT read/write runtime files directly
+    # ==============================
+    def _runtime_dir(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "runtime"
+
+    def _trade_journal_path(self) -> Path:
+        return self._runtime_dir() / "trades.jsonl"
+
+    def _ticks_stream_path(self) -> Path:
+        return self._runtime_dir() / "ticks_stream.jsonl"
+
+    def persist_trade_record(self, rec: dict) -> None:
+        """Core-owned persistence for trades history (runtime/trades.jsonl)."""
+        if not self._guard_write(
+            "persist_trade_record",
+            {"keys": sorted(list(rec.keys())) if isinstance(rec, dict) else []},
+        ):
+            return
+
+        try:
+            p = self._trade_journal_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+
+            line = json.dumps(rec, ensure_ascii=False)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            log.exception("UIAPI: persist_trade_record failed")
+            return
+
+        # Also add to recent trades cache for UI
+        try:
+            row = {
+                "ts": rec.get("ts") or rec.get("time") or rec.get("timestamp"),
+                "symbol": rec.get("symbol"),
+                "side": rec.get("side"),
+                "qty": rec.get("qty") or rec.get("quantity"),
+                "price": rec.get("price"),
+                "pnl": rec.get("pnl"),
+                "fee": rec.get("fee"),
+                "source": rec.get("source") or rec.get("actor") or "ui",
+                "exit": rec.get("price") or rec.get("exit"),
+            }
+            self.add_recent_trade(row)
+        except Exception:
+            log.exception("UIAPI: persist_trade_record -> add_recent_trade failed")
+
+    def get_recent_trades_from_runtime(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Read last N trades from runtime/trades.jsonl (core-owned)."""
+        try:
+            p = self._trade_journal_path()
+            if not p.exists():
+                return []
+            with p.open("r", encoding="utf-8") as f:
+                lines = f.readlines()[-max(1, int(limit or 500)):]
+        except Exception:
+            log.exception("UIAPI: get_recent_trades_from_runtime read failed")
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for ln in lines:
+            try:
+                rec = json.loads(ln)
+            except Exception:
+                continue
+
+            ts_val = rec.get("ts")
+            if isinstance(ts_val, (int, float)):
+                try:
+                    time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_val))
+                except Exception:
+                    time_str = str(ts_val)
+            else:
+                time_str = str(ts_val or "")
+
+            rows.append(
+                {
+                    "time": time_str,
+                    "symbol": rec.get("symbol"),
+                    "tier": "-",
+                    "action": rec.get("side") or rec.get("status") or "",
+                    "tp": None,
+                    "sl": None,
+                    "pnl_pct": rec.get("pnl_pct"),
+                    "pnl_abs": rec.get("pnl_cash"),
+                    "qty": rec.get("qty"),
+                    "entry": rec.get("entry"),
+                    "exit": rec.get("price") or rec.get("exit"),
+                }
+            )
+        return rows
+
+    def get_trades_for_range(
+        self,
+        symbol: str,
+        ts_from_ms: int,
+        ts_to_ms: int,
+        *,
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        """Read trades.jsonl tail and return raw trades filtered by time range.
+
+        Returns a list of dicts (best-effort):
+          {"ts_ms": int, "symbol": "BTCUSDT", "side": "BUY"|"SELL", "price": float, "qty": float|None}
+
+        Notes:
+        - core-owned runtime I/O (UI must not access filesystem directly)
+        - missing file => []
+        - invalid/partial rows are skipped
+        """
+        sym_u = (symbol or "").upper().strip()
+        try:
+            t0 = int(ts_from_ms or 0)
+            t1 = int(ts_to_ms or 0)
+        except Exception:
+            return []
+        if not sym_u or t0 <= 0 or t1 <= 0 or t1 <= t0:
+            return []
+
+        try:
+            p = self._trade_journal_path()
+            if not p.exists():
+                return []
+            with p.open("r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if limit and len(lines) > int(limit):
+                lines = lines[-int(limit) :]
+        except Exception:
+            log.exception("UIAPI: get_trades_for_range read failed")
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for ln in lines:
+            ln = (ln or "").strip()
+            if not ln:
+                continue
+            try:
+                rec = json.loads(ln)
+            except Exception:
+                continue
+
+            try:
+                rs = (rec.get("symbol") or "").upper().strip()
+                if rs != sym_u:
+                    continue
+            except Exception:
+                continue
+
+            try:
+                ts_ms = rec.get("ts")
+                if not isinstance(ts_ms, (int, float)):
+                    continue
+                ts_ms_i = int(ts_ms)
+            except Exception:
+                continue
+
+            if ts_ms_i < t0 or ts_ms_i >= t1:
+                continue
+
+            side = str(rec.get("side") or rec.get("action") or "").upper().strip()
+            if side not in ("BUY", "SELL"):
+                # skip non-trade journal records
+                continue
+
+            price_raw = rec.get("price")
+            if price_raw is None:
+                price_raw = rec.get("entry")
+            if price_raw is None:
+                price_raw = rec.get("exit")
+            try:
+                price = float(price_raw)
+            except Exception:
+                continue
+            if price <= 0:
+                continue
+
+            qty_val = rec.get("qty")
+            try:
+                qty = float(qty_val) if qty_val is not None else None
+            except Exception:
+                qty = None
+
+            out.append(
+                {
+                    "ts_ms": ts_ms_i,
+                    "symbol": sym_u,
+                    "side": side,
+                    "price": price,
+                    "qty": qty,
+                }
+            )
+
+        return out
+
+    def get_tick_series(self, symbol: str, max_points: int = 300) -> tuple[list[int], list[float]]:
+        """Return chart series from runtime/ticks_stream.jsonl (core-owned)."""
+        sym_u = (symbol or "").upper()
+        prices: list[float] = []
+        times: list[int] = []
+
+        try:
+            p = self._ticks_stream_path()
+            if not p.exists():
+                return times, prices
+            with p.open("r", encoding="utf-8") as f:
+                lines = f.readlines()[-max(1, int(max_points or 300)):]
+        except Exception:
+            log.exception("UIAPI: get_tick_series read failed")
+            return times, prices
+
+        for ln in lines:
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                continue
+            if obj.get("symbol") and str(obj.get("symbol")).upper() != sym_u:
+                continue
+            price = obj.get("price") or obj.get("p") or obj.get("close")
+            if price is None:
+                continue
+            try:
+                prices.append(float(price))
+                times.append(len(times))
+            except Exception:
+                continue
+
+        return times, prices
+
+    def get_ohlc_series(
+        self,
+        symbol: str,
+        timeframe_s: int,
+        *,
+        max_candles: int = 300,
+        max_ticks: int = 5000,
+    ) -> dict:
+        """Return OHLC candles built from runtime/ticks_stream.jsonl (core-owned, read-only).
+
+        Contract (best-effort):
+          {
+            "symbol": "BTCUSDT",
+            "timeframe_s": 60,
+            "source": "runtime/ticks_stream.jsonl",
+            "last_tick_ts_ms": 1700000000000 | null,
+            "candles": [
+              {"ts_open_ms": 1700000000000, "o": 1.0, "h": 1.1, "l": 0.9, "c": 1.05, "n": 42},
+              ...
+            ],
+            "reason": "" | "NO_STREAM" | "NO_TICKS" | "BAD_TIMEFRAME" | "READ_FAILED"
+          }
+
+        UI must treat this as *read-only observability*.
+        """
+        sym_u = (symbol or "").upper().strip()
+        tf_s = int(timeframe_s or 0)
+        if not sym_u or tf_s <= 0:
+            return {
+                "symbol": sym_u,
+                "timeframe_s": tf_s,
+                "source": "runtime/ticks_stream.jsonl",
+                "last_tick_ts_ms": None,
+                "candles": [],
+                "reason": "BAD_TIMEFRAME",
+            }
+
+        try:
+            p = self._ticks_stream_path()
+            if not p.exists():
+                return {
+                    "symbol": sym_u,
+                    "timeframe_s": tf_s,
+                    "source": "runtime/ticks_stream.jsonl",
+                    "last_tick_ts_ms": None,
+                    "candles": [],
+                    "reason": "NO_STREAM",
+                }
+
+            # Read tail (best-effort). We don't want to load the whole file.
+            with p.open("r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if max_ticks and len(lines) > int(max_ticks):
+                lines = lines[-int(max_ticks) :]
+        except Exception:
+            log.exception("UIAPI: get_ohlc_series read failed")
+            return {
+                "symbol": sym_u,
+                "timeframe_s": tf_s,
+                "source": "runtime/ticks_stream.jsonl",
+                "last_tick_ts_ms": None,
+                "candles": [],
+                "reason": "READ_FAILED",
+            }
+
+        ticks: list[dict] = []
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                continue
+            if obj.get("symbol") and str(obj.get("symbol")).upper() != sym_u:
+                continue
+            ticks.append(obj)
+
+        if not ticks:
+            return {
+                "symbol": sym_u,
+                "timeframe_s": tf_s,
+                "source": "runtime/ticks_stream.jsonl",
+                "last_tick_ts_ms": None,
+                "candles": [],
+                "reason": "NO_TICKS",
+            }
+
+        try:
+            candles, last_ts = build_ohlc_from_ticks(
+                ticks,
+                timeframe_ms=tf_s * 1000,
+                max_candles=max_candles,
+            )
+            return {
+                "symbol": sym_u,
+                "timeframe_s": tf_s,
+                "source": "runtime/ticks_stream.jsonl",
+                "last_tick_ts_ms": last_ts,
+                "candles": [c.as_dict() for c in candles],
+                "reason": "",
+            }
+        except Exception:
+            log.exception("UIAPI: get_ohlc_series build failed")
+            return {
+                "symbol": sym_u,
+                "timeframe_s": tf_s,
+                "source": "runtime/ticks_stream.jsonl",
+                "last_tick_ts_ms": None,
+                "candles": [],
+                "reason": "BUILD_FAILED",
+            }
+
+    def open_trades_journal_file(self) -> None:
+        """Open runtime/trades.jsonl in OS (UI does not see paths)."""
+        try:
+            p = self._trade_journal_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if not p.exists():
+                p.write_text("", encoding="utf-8")
+            if os.name == "nt":
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(p)])
+            else:
+                subprocess.Popen(["xdg-open", str(p)])
+        except Exception:
+            log.exception("UIAPI: open_trades_journal_file failed")
+
+    def open_runtime_folder(self) -> None:
+        """Open runtime folder in OS (UI does not see paths)."""
+        try:
+            p = self._runtime_dir()
+            p.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(p)])
+            else:
+                subprocess.Popen(["xdg-open", str(p)])
+        except Exception:
+            log.exception("UIAPI: open_runtime_folder failed")
+
+    def update_market_stats(self, symbol: str, stats: Dict[str, Any]) -> None:
+        """Обновить market stats по символу (best-effort). Вызывается фидами из их потока."""
+        if not symbol:
+            return
+        if not isinstance(stats, dict):
+            return
+        sym = str(symbol).upper()
+        try:
+            with self._market_stats_lock:
+                cur = self._market_stats.get(sym) or {}
+                cur.update(stats)
+                cur["ts"] = int(time.time() * 1000)
+                self._market_stats[sym] = cur
+        except Exception:
+            _log_throttled(
+                "uiapi.market_stats.update",
+                "debug",
+                f"UIAPI: update_market_stats failed for {sym} (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
+            return
+
+    def get_market_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Снапшот market_stats (копия), безопасно для UI."""
+        try:
+            with self._market_stats_lock:
+                return dict(self._market_stats)
+        except Exception:
+            return {}
+
+    # ==============================
     #      СНАПШОТ СОСТОЯНИЯ
     # ==============================
+    def _fallback_positions_from_runtime(self, runtime_state: dict, realm: str) -> dict:
+        """
+        realm: "real" | "sim"
+        Пытается достать positions из runtime_state (state.json/sim_state.json),
+        чтобы UI не зависел от TPSL при SAFE/PANIC/autoloop OFF.
+        """
+        if not isinstance(runtime_state, dict):
+            return {}
+
+        bucket = runtime_state.get(realm) or runtime_state.get(realm.upper()) or {}
+        if not isinstance(bucket, dict):
+            return {}
+
+        pos = bucket.get("positions") or bucket.get("open_positions") or bucket.get("positions_map") or {}
+        if isinstance(pos, list):
+            out = {}
+            for p in pos:
+                if isinstance(p, dict) and p.get("symbol"):
+                    out[str(p["symbol"]).upper()] = p
+            return out
+
+        if isinstance(pos, dict):
+            # нормализуем ключи в UPPER
+            out = {}
+            for k, v in pos.items():
+                out[str(k).upper()] = v
+            return out
+
+        return {}
     
     def _build_state_payload(self) -> Dict[str, Any]:
         """
@@ -342,11 +1076,20 @@ class UIAPI:
             except Exception:
                 positions = {}
 
-            # equity из TPSL
+        # equity из TPSL (НЕ зависит от fallback)
+        if self.tpsl is not None:
             try:
                 equity = float(getattr(self.tpsl, "equity"))
             except Exception:
                 equity = None
+
+        # fallback (REAL): позиции из runtime_state, если TPSL недоступен / SAFE / autoloop OFF
+        if not positions and str(self._ui_mode).upper() == "REAL":
+            try:
+                rt = load_runtime_state()
+                positions = self._fallback_positions_from_runtime(rt, realm="real")
+            except Exception:
+                positions = {}
 
         # fallback: equity можно попытаться взять из core_snap
         if equity is None:
@@ -430,8 +1173,13 @@ class UIAPI:
                     if v is not None:
                         open_positions_count = int(v)
                 except Exception:
-                    pass
-
+                    _log_throttled(
+                        "uiapi.sim.open_positions_count",
+                        "debug",
+                        "UIAPI: SIM open_positions_count fallback failed (ignored)",
+                        interval_s=60.0,
+                        exc_info=True,
+                    )
 
         # --- 4.1) Open PnL по открытым позициям (best-effort) ---
         open_pnl_abs: Optional[float] = None
@@ -498,7 +1246,13 @@ class UIAPI:
             try:
                 health["core_lag_s"] = core_lag_s
             except Exception:
-                pass
+                _log_throttled(
+                    "uiapi.health.core_lag_s",
+                    "debug",
+                    "UIAPI: health['core_lag_s'] assign failed (ignored)",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
         if core_stall is not None:
             try:
                 health["core_stall"] = core_stall
@@ -511,9 +1265,21 @@ class UIAPI:
                             health["messages"] = msgs
                         msgs.append("CORE_STALL")
                     except Exception:
-                        pass
+                        _log_throttled(
+                            "uiapi.health.core_stall_msgs",
+                            "debug",
+                            "UIAPI: health messages append failed (ignored)",
+                            interval_s=60.0,
+                            exc_info=True,
+                        )
             except Exception:
-                pass
+                _log_throttled(
+                    "uiapi.health.core_stall",
+                    "debug",
+                    "UIAPI: core_stall propagation failed (ignored)",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
 
         core_health = core_snap.get("health")
         if isinstance(core_health, dict):
@@ -521,8 +1287,13 @@ class UIAPI:
                 for k, v in core_health.items():
                     health[k] = v
             except Exception:
-                # не критично
-                pass
+                _log_throttled(
+                    "uiapi.health.merge",
+                    "debug",
+                    "UIAPI: health merge failed (ignored)",
+                    interval_s=60.0,
+                    exc_info=True,
+                )
 
         # Латентность (если есть last_tick_ts в снапшоте state)
         latency_ms: Optional[float] = None
@@ -553,6 +1324,8 @@ class UIAPI:
             "core_time_backwards": core_time_backwards,
             "core_time_backwards_delta_s": core_time_backwards_delta_s,            
             "safe_mode": core_snap.get("safe_mode") or {},
+            "heartbeats": hb.snapshot(),
+            "market_stats": self.get_market_stats(),
             "ts": int(time.time() * 1000),
             # NEW: recent-журналы для UI
             "signals_recent": self.get_recent_signals(),
@@ -574,6 +1347,41 @@ class UIAPI:
         except Exception:
             return {}
 
+    def is_panic_active(self) -> bool:
+        """
+        UI-safe: проверка состояния PANIC.
+
+        Возвращает:
+        - True, если runtime сообщает активный PANIC;
+        - False в остальных случаях (best-effort).
+
+        UI не взаимодействует с runtime напрямую.
+        """
+        try:
+            from core.panic_facade import is_panic_active  # core-owned facade
+            return bool(is_panic_active())
+        except Exception:
+            return False
+
+    def persist_sim_state(self, snapshot: Dict[str, Any]) -> None:
+        """UI-safe: сохранить sim_state (UI не импортирует runtime.sim_state_tools)."""
+        if not self._guard_write("persist_sim_state"):
+            return
+        if not isinstance(snapshot, dict):
+            return
+        try:
+            # локальный импорт, чтобы не раздувать зависимости при старте
+            from runtime.sim_state_tools import save_sim_state
+            save_sim_state(snapshot)
+        except Exception:
+            _log_throttled(
+                "uiapi.persist_sim_state",
+                "warning",
+                "UIAPI: persist_sim_state failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
+
     def maybe_persist_runtime_state(self, snapshot: Optional[Dict[str, Any]] = None) -> None:
         """
         STEP1.3.3 — best-effort runtime-персистентность.
@@ -582,6 +1390,8 @@ class UIAPI:
         Обновляет runtime_state на основе UI-снапшота (positions + meta),
         не затрагивая sim-часть.
         """
+        if not self._guard_write("maybe_persist_runtime_state"):
+            return
         # Лёгкий time-based throttle, чтобы не заливать диск.
         try:
             now = time.time()
@@ -590,8 +1400,13 @@ class UIAPI:
             if now - last < 5.0:
                 return
         except Exception:
-            # если что-то пошло не так, не даём этому сломать UI
-            pass
+            _log_throttled(
+                "uiapi.persist_runtime.throttle",
+                "debug",
+                "UIAPI: runtime persist throttle check failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
         if snapshot is None:
             try:
@@ -612,8 +1427,13 @@ class UIAPI:
             persist_from_ui_snapshot(snapshot)
             self._last_runtime_persist_ts = time.time()
         except Exception:
-            # любые ошибки на этом пути не должны ломать UI
-            pass
+            _log_throttled(
+                "uiapi.persist_runtime.write",
+                "warning",
+                "UIAPI: persist_from_ui_snapshot failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
     def reset_sim_state(self) -> None:
         """
@@ -621,12 +1441,19 @@ class UIAPI:
 
         UI не трогает файлы напрямую: всё идёт через core.runtime_state.reset_sim_state().
         """
+        if not self._guard_write("reset_sim_state"):
+            return
         try:
             reset_sim_state()
         except Exception:
-            # Ошибки при сбросе SIM не должны ломать UI.
-            pass
-    
+            _log_throttled(
+                "uiapi.reset_sim_state",
+                "warning",
+                "UIAPI: reset_sim_state failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
+
     # ==============================
     #            ХУКИ UI
     # ==============================
@@ -665,8 +1492,13 @@ class UIAPI:
             if isinstance(snap, dict):
                 return snap
         except Exception:
-            # На всякий случай не ломаем UI — возвращаем прямой снапшот.
-            pass
+            _log_throttled(
+                "uiapi.snapshot.binder",
+                "warning",
+                "UIAPI: StateBinder snapshot path failed; falling back",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
         return self._build_state_payload()
 
@@ -691,29 +1523,108 @@ class UIAPI:
 
         return 1
 
+    def on_tick(
+        self,
+        symbol: str,
+        price: float,
+        bid: Optional[float] = None,
+        ask: Optional[float] = None,
+        ts: Optional[float] = None,
+        write_stream: bool = True,
+    ) -> int:
+        """
+        UI → ядро: проброс тика (price + bid/ask) в StateEngine.
+
+        write_stream=False используется для ingest из runtime/ticks_stream.jsonl,
+        чтобы не было эха (upsert_ticker по умолчанию пишет обратно в stream).
+        """
+        state = self.state
+        if not hasattr(state, "upsert_ticker"):
+            return 0
+
+        try:
+            symbol_u = str(symbol or "").upper()
+        except Exception:
+            symbol_u = "UNKNOWN"
+
+        try:
+            ts_n = self._normalize_ts(ts)
+            state.upsert_ticker(
+                symbol_u,
+                float(price),
+                bid=float(bid) if bid is not None else None,
+                ask=float(ask) if ask is not None else None,
+                ts=ts_n,
+                write_stream=bool(write_stream),
+            )
+        except Exception:
+            return 0
+
+        return 1
+
     # ==============================
     #   ADVISOR SNAPSHOT / TREND
     # ==============================
+    
     def update_advisor_snapshot(
-        self,
-        signal: Optional[Dict[str, Any]],
-        recommendation: Optional[Dict[str, Any]],
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """
-        UI вызывает это, когда есть новый сигнал/рекомендация от Advisor.
-        """
-        snap: Dict[str, Any] = {}
-        snap["signal"] = signal or {}
-        snap["recommendation"] = recommendation or {}
-        snap["meta"] = meta or {}
-        try:
-            trend = snap["recommendation"].get("trend")
-        except Exception:
-            trend = None
-        if trend is not None:
-            snap["trend"] = trend
-        self._advisor_snapshot = snap
+            self,
+            signal: Optional[Dict[str, Any]],
+            recommendation: Optional[Dict[str, Any]],
+            meta: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            """
+            UI вызывает это, когда есть новый сигнал/рекомендация от Advisor.
+
+            v2.2.52:
+            - Advisor snapshot remains UI-facing
+            - First simple SIM strategy may emit rare SIM_DECISION_JOURNAL (events-only)
+            """
+            snap: Dict[str, Any] = {}
+            snap["signal"] = signal or {}
+            snap["recommendation"] = recommendation or {}
+            snap["meta"] = meta or {}
+            try:
+                trend = snap["recommendation"].get("trend")
+            except Exception:
+                trend = None
+            if trend is not None:
+                snap["trend"] = trend
+            self._advisor_snapshot = snap
+
+            # v2.2.52 — First Simple Strategy (SIM-only, events-only)
+            try:
+                from core.strategies.simple_strategy_v1 import (
+                    maybe_publish_sim_decision_journal,
+                    _DecisionMem,
+                )
+
+                mem = getattr(self, "_sim_strategy_mem_by_symbol", None)
+                if mem is None or not isinstance(mem, dict):
+                    mem = {}  # symbol -> _DecisionMem
+                    self._sim_strategy_mem_by_symbol = mem  # type: ignore[attr-defined]
+
+                # type: ignore[arg-type]
+                maybe_publish_sim_decision_journal(mem, signal, recommendation, meta)
+            except Exception:
+                # strategy must never break UI flow
+                pass
+
+            # v2.2.104 — proposal rename: avoid clash with REAL Triple Strategy
+            try:
+                from core.strategies.proposal_2a1r import compute_proposal
+
+                proposal = compute_proposal(signal, recommendation, meta)
+                if isinstance(proposal, dict):
+                    # attach into advisor snapshot (read-only surface)
+                    try:
+                        snap = dict(self._advisor_snapshot or {})
+                    except Exception:
+                        snap = {}
+                    snap["sim_proposal_2a1r"] = proposal
+                    self._advisor_snapshot = snap
+            except Exception:
+                # must never break UI flow
+                pass
 
     # ==============================
     #  GET LAST PRICE / PREVIEW / BUY
@@ -760,15 +1671,46 @@ class UIAPI:
             # на уровне UIAPI возвращаем безопасный default
             return {}
 
+    def decide_replace_from_signal_and_reco(
+        self,
+        signal: Dict[str, Any],
+        recommendation: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Any]:
+        """
+        UI helper: получить ReplaceLogic decision для label/UX.
+
+        Важно: это НЕ торговое решение и НЕ инициирует исполнение.
+        """
+        try:
+            from core.replace_logic import decide_from_signal_and_reco
+
+            return decide_from_signal_and_reco(signal, recommendation)
+        except Exception:
+            _log_throttled(
+                "uiapi.replace_logic.decide",
+                "warning",
+                "UIAPI: ReplaceLogic decision failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
+            return None
+
     def update_tpsl_settings_from_ui(self, settings: Dict[str, Any]) -> None:
         """
         Обновить TPSL-настройки по запросу UI.
         """
+        if not self._guard_write("update_tpsl_settings_from_ui"):
+            return
         try:
             update_tpsl_settings(settings)
         except Exception:
-            # ошибки сохранения настроек не должны ронять UI
-            pass
+            _log_throttled(
+                "uiapi.tpsl_settings.update",
+                "warning",
+                "UIAPI: update_tpsl_settings_from_ui failed (ignored)",
+                interval_s=60.0,
+                exc_info=True,
+            )
 
     def preview(
         self,
@@ -807,30 +1749,106 @@ class UIAPI:
         side: str = "BUY",
         reason: str = "UI",
         tpsl_cfg: Optional[TPSSLConfig] = None,
+        safe_code: Optional[str] = None,
     ) -> bool:
         """
         Отправка рыночного ордера через executor.
         """
         # Используем основной вход executor.place_order, он уже делает DRY-run и логирует
-        if not hasattr(self.executor, "place_order"):
-            return False
-
+        cid = None
         try:
-            _res = self.executor.place_order(
+            cid = new_cid() if new_cid is not None else None
+        except Exception:
+            cid = None
+
+        _emit_event(
+            "ORDER_REQUEST",
+            {
+                "action": "MARKET",
+                "symbol": str(symbol).upper(),
+                "qty": float(qty),
+                "side": str(side or "BUY").upper(),
+                "reason": str(reason or "UI"),
+                "mode": str(self._ui_mode),
+            },
+            cid=cid,
+        )
+
+        # сброс последней ошибки ордера (для UI explain)
+        self._last_order_error = None
+
+        # --- EXECUTE ORDER (SIM/REAL depends on executor mode) ---
+        try:
+            self.executor.place_order(
                 symbol=symbol,
                 side=side,
                 qty=qty,
                 type_="MARKET",
+                safe_code=safe_code,
             )
-        except Exception:
+        except PermissionError as e:
+            self._last_order_error = str(e)
+            _log_throttled(
+                "uiapi.buy_market.permission_error",
+                "warning",
+                f"UIAPI: ORDER_BLOCKED PermissionError: {self._last_order_error}",
+                interval_s=10.0,
+                exc_info=False,
+            )
+            _emit_event(
+                "ORDER_BLOCKED",
+                {
+                    "action": "MARKET",
+                    "symbol": str(symbol).upper(),
+                    "qty": float(qty),
+                    "side": str(side or "BUY").upper(),
+                    "reason": "POLICY",
+                    "error": self._last_order_error,
+                    "mode": str(self._ui_mode),
+                },
+                cid=cid,
+            )
             return False
+        except Exception as e:
+            self._last_order_error = repr(e)
+            _emit_event(
+                "ORDER_FAIL",
+                {
+                    "action": "MARKET",
+                    "symbol": str(symbol).upper(),
+                    "qty": float(qty),
+                    "side": str(side or "BUY").upper(),
+                    "error": repr(e),
+                    "mode": str(self._ui_mode),
+                },
+                cid=cid,
+            )
+            return False
+        
+        _emit_event(
+            "ORDER_OK",
+            {
+                "action": "MARKET",
+                "symbol": str(symbol).upper(),
+                "qty": float(qty),
+                "side": str(side or "BUY").upper(),
+                "mode": str(self._ui_mode),
+            },
+            cid=cid,
+        )
 
         # TPSL-обёртка (если есть)
         if self.tpsl is not None and tpsl_cfg is not None:
             try:
                 self.tpsl.attach(symbol, tpsl_cfg)
             except Exception:
-                pass
+                _log_throttled(
+                    "uiapi.tpsl.attach",
+                    "warning",
+                    f"UIAPI: tpsl.attach({symbol}) failed (ignored)",
+                    interval_s=30.0,
+                    exc_info=True,
+                )
 
         return True
 
@@ -842,23 +1860,90 @@ class UIAPI:
         """
         Ручное закрытие позиции из UI (через TPSL).
         """
+        if not self._guard_write(
+            "close_position",
+            {"symbol": str(symbol).upper(), "reason": str(reason or "UI_close"), "mode": str(self._ui_mode)},
+        ):
+            return
+
+        _emit_event(
+            "CLOSE_REQUEST",
+            {"symbol": str(symbol).upper(), "reason": str(reason or "UI_close"), "mode": str(self._ui_mode)},
+            actor="ui",
+        )
         if self.tpsl is not None:
             try:
                 self.tpsl.close(symbol.upper(), reason)
+                _emit_event(
+                    "CLOSE_OK",
+                    {"symbol": str(symbol).upper(), "reason": str(reason or "UI_close"), "mode": str(self._ui_mode)},
+                    actor="ui",
+                )
             except Exception:
-                pass
+                log.exception("UIAPI: close_position failed")
+                _emit_event(
+                    "CLOSE_ERR",
+                    {"symbol": str(symbol).upper(), "reason": str(reason or "UI_close"), "mode": str(self._ui_mode)},
+                    actor="ui",
+                )
 
     def panic(self, symbol: str) -> None:
         """
         Паник-селл из UI.
         """
+        if not self._guard_write(
+            "panic",
+            {"symbol": str(symbol).upper(), "mode": str(self._ui_mode)},
+        ):
+            return
+
+        _emit_event(
+            "PANIC_REQUEST",
+            {"symbol": str(symbol).upper(), "mode": str(self._ui_mode)},
+            actor="ui",
+        )
         if self.tpsl is not None:
             try:
-                self.tpsl.close(symbol.upper(), "UI_panic")
+                self.tpsl.panic(symbol.upper(), reason="UI_panic")
+                _emit_event(
+                    "PANIC_OK",
+                    {"symbol": str(symbol).upper(), "mode": str(self._ui_mode)},
+                    actor="ui",
+                )
             except Exception:
-                pass
+                log.exception("UIAPI: panic failed")
+                _emit_event(
+                    "PANIC_ERR",
+                    {"symbol": str(symbol).upper(), "mode": str(self._ui_mode)},
+                    actor="ui",
+                )
 
+    def activate_panic_kill(self) -> None:
+        if not self._guard_write(
+            "activate_panic_kill",
+            {"mode": str(self._ui_mode)},
+        ):
+            return
+
+        _emit_event("PANIC_KILL_REQUEST", {"mode": str(self._ui_mode)}, actor="ui")
+        try:
+            if self.tpsl is not None:
+                self.tpsl.activate_panic_kill(reason="UI_panic_kill")
+            _emit_event("PANIC_KILL_OK", {"mode": str(self._ui_mode)}, actor="ui")
+        except Exception:
+            log.exception("UIAPI: activate_panic_kill failed")
+            _emit_event("PANIC_KILL_ERR", {"mode": str(self._ui_mode)}, actor="ui")
+
+    # ==============================
+    #     REAL: MARKET ORDERS (DIAG ONLY; UI READ-ONLY GUARD)
+    # ==============================
     def real_buy_market(self, symbol: str, quantity: float):
+        if not self._guard_write(
+            "real_buy_market",
+            {"symbol": str(symbol).upper(), "quantity": float(quantity), "mode": str(self._ui_mode)},
+        ):
+            return None
+
         from core.orders_real import place_order_real
         return place_order_real(
             symbol=symbol,
@@ -869,6 +1954,12 @@ class UIAPI:
         )
 
     def real_sell_market(self, symbol: str, quantity: float):
+        if not self._guard_write(
+            "real_sell_market",
+            {"symbol": str(symbol).upper(), "quantity": float(quantity), "mode": str(self._ui_mode)},
+        ):
+            return None
+
         from core.orders_real import place_order_real
         return place_order_real(
             symbol=symbol,
@@ -877,3 +1968,34 @@ class UIAPI:
             quantity=quantity,
             safe_code=None,
         )
+
+
+def build_ui_bridge(executor_mode: str = "SIM", enable_tpsl: bool = True) -> UIAPI:
+    """Construct a UIAPI instance for UI-side SIM bridge without UI importing core primitives.
+
+    IMPORTANT:
+    - UI must not import/construct StateEngine/OrderExecutor/TPSL directly.
+    - This helper keeps construction inside core layer (UIAPI module).
+    """
+    state = StateEngine(enable_tpsl=bool(enable_tpsl))
+    executor = OrderExecutor(mode=str(executor_mode), state=state)
+
+    tpsl: Optional[TPSLManager] = None
+    if enable_tpsl:
+        cfg = TPSSLConfig()
+        tpsl = TPSLManager(executor, cfg)
+        try:
+            state.attach_tpsl(tpsl)
+        except Exception:
+            _log_throttled(
+                "uiapi.build_ui_bridge.attach_tpsl",
+                "warning",
+                "UIAPI: build_ui_bridge: state.attach_tpsl(tpsl) failed; continuing without TPSL",
+                interval_s=60.0,
+                exc_info=True,
+            )
+            # TPSL wiring must not break UI bridge construction
+            tpsl = None
+
+    api = UIAPI(state, executor, tpsl=tpsl)
+    return api
