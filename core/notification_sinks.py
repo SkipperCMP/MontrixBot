@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, List
 import logging
 import threading
+import json
+from pathlib import Path
 
 from core.notifications_center import NotificationEvent
 
@@ -79,3 +81,42 @@ class MemorySink:
                 return list(self._items)
         except Exception:
             return []
+
+class JsonlNotificationSink:
+    """
+    Append-only JSONL sink for notification events.
+
+    - Core-owned
+    - Best-effort
+    - Never raises
+    - Writes to runtime/notifications.jsonl
+    """
+
+    def __init__(self, path: str = "runtime/notifications.jsonl") -> None:
+        self._path = Path(path)
+        self._lock = threading.RLock()
+
+    def handle(self, event: NotificationEvent) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+
+            meta = {}
+            if isinstance(getattr(event, "meta", None), dict):
+                meta = dict(event.meta)
+
+            data = {
+                "ts": float(getattr(event, "ts", 0.0)),
+                "level": str(getattr(event, "level", "INFO")),
+                "topic": str(getattr(event, "topic", "system")),
+                "message": str(getattr(event, "message", "")),
+                "meta": meta,
+            }
+
+            line = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+            with self._lock:
+                with self._path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception:
+            # notifications must never break runtime
+            return

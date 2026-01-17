@@ -24,6 +24,13 @@ def main() -> None:
         ensure_event_spine()
     except Exception:
         pass
+
+    # v2.3.9 hotfix: initialize core notification center (best-effort)
+    try:
+        from core.notifications_center import get_notification_center
+        get_notification_center().emit_now("INFO", "system", "ui_started", meta={"source": "ui"})
+    except Exception:
+        pass
         
     ui_state = UIState()
 

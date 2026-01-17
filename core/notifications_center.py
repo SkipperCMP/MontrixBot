@@ -125,12 +125,25 @@ def get_notification_center() -> NotificationCenter:
 
                 # Best-effort: attach default LogSink once.
                 try:
-                    from core.notification_sinks import LogSink
+                    from core.notification_sinks import LogSink, JsonlNotificationSink
 
                     _NOTIFY_SINGLETON.register_sink(LogSink())
+                    _NOTIFY_SINGLETON.register_sink(JsonlNotificationSink())
+
+                    # one-time boot marker (creates runtime/notifications.jsonl)
+                    try:
+                        if not getattr(_NOTIFY_SINGLETON, "_boot_emitted", False):
+                            _NOTIFY_SINGLETON.emit_now(
+                                "INFO",
+                                "system",
+                                "notification_center_ready",
+                                meta={"source": "core"},
+                            )
+                            setattr(_NOTIFY_SINGLETON, "_boot_emitted", True)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-
             return _NOTIFY_SINGLETON
     except Exception:
         # last resort: return a new instance, still best-effort
