@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence, Any
 
+import os
 import tkinter as tk
 from tkinter import ttk
 
@@ -120,6 +121,18 @@ def build_topbar_ui(app: Any, symbols: Sequence[str]) -> None:
     # --- chart timeframe (Candles v2) ---
     if not hasattr(app, "var_chart_timeframe"):
         app.var_chart_timeframe = tk.StringVar(value="1m")
+
+    # --- UI toggle: Indicators (RSI/MACD) ---
+    # In-memory only (READ-ONLY): does not write runtime state.
+    if not hasattr(app, "var_chart_indicators_on"):
+        raw = str(os.environ.get("MB_UI_CHART_INDICATORS", "")).strip().lower()
+        default_on = True if raw == "" else (raw not in ("0", "false", "no", "off"))
+        app.var_chart_indicators_on = tk.BooleanVar(value=bool(default_on))
+
+    if not hasattr(app, "var_chart_indicators_label"):
+        app.var_chart_indicators_label = tk.StringVar(
+            value=("Indicators: ON" if bool(app.var_chart_indicators_on.get()) else "Indicators: OFF")
+        )
 
     # Статус переносим в ОТДЕЛЬНУЮ строку под кнопками.
     status_row = ttk.Frame(app, style="Dark.TFrame")
@@ -446,4 +459,11 @@ def build_paths_ui(app: Any) -> None:
         text="Open LIVE Candles",
         style="Dark.TButton",
         command=app._open_candles_live_chart,
+    ).pack(side="left", padx=4)
+
+    ttk.Button(
+        box,
+        textvariable=app.var_chart_indicators_label,
+        style="Dark.TButton",
+        command=getattr(app.chart_controller, "toggle_ui_indicators", None),
     ).pack(side="left", padx=4)

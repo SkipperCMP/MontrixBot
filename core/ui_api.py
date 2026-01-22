@@ -108,7 +108,7 @@ class UIAPI:
         self.state = state
         self.executor = executor
         self.tpsl = tpsl
-        self.symbols = symbols or ["ADAUSDT", "HBARUSDT", "BONKUSDT"]
+        self.symbols = symbols or ["BTCUSDT", "HBARUSDT", "BONKUSDT"]
 
         # текущий UI-режим
         self._ui_mode: str = "SIM"
@@ -790,23 +790,53 @@ class UIAPI:
     ) -> dict:
         """Return OHLC candles built from runtime/ticks_stream.jsonl (core-owned, read-only).
 
+        Fallback (read-only, in-memory only):
+          - If ticks stream is missing/empty/unreadable, best-effort fetch Binance klines
+            and return candles without writing anything to runtime.
+
         Contract (best-effort):
           {
             "symbol": "BTCUSDT",
             "timeframe_s": 60,
-            "source": "runtime/ticks_stream.jsonl",
+            "source": "runtime/ticks_stream.jsonl" | "binance/klines",
             "last_tick_ts_ms": 1700000000000 | null,
             "candles": [
               {"ts_open_ms": 1700000000000, "o": 1.0, "h": 1.1, "l": 0.9, "c": 1.05, "n": 42},
               ...
             ],
-            "reason": "" | "NO_STREAM" | "NO_TICKS" | "BAD_TIMEFRAME" | "READ_FAILED"
+            "reason": "" | "NO_STREAM" | "NO_TICKS" | "BAD_TIMEFRAME" | "READ_FAILED" | "BOOTSTRAP" | "BOOTSTRAP_FAILED"
           }
 
         UI must treat this as *read-only observability*.
         """
         sym_u = (symbol or "").upper().strip()
+
+        tf_raw = timeframe_s
         tf_s = int(timeframe_s or 0)
+
+        # Some legacy paths may pass timeframe in minutes (1,5,15) instead of seconds.
+        # IMPORTANT: 60 is a valid 1m value in seconds, so DO NOT auto-normalize 60 -> 3600.
+        if tf_s in (1, 5, 15):
+            tf_s = tf_s * 60
+
+        # DEBUG to stdout (throttled) to confirm what TF actually arrives in live UI
+        try:
+            _dbg_last = getattr(self, "_dbg_last_ohlc_tf_log_ts", 0.0) or 0.0
+        except Exception:
+            _dbg_last = 0.0
+
+        try:
+            now_ts = time.time()
+        except Exception:
+            now_ts = 0.0
+
+        if now_ts - _dbg_last >= 30.0:
+            try:
+                setattr(self, "_dbg_last_ohlc_tf_log_ts", now_ts)
+            except Exception:
+                pass
+            print(f"UIAPI: DEBUG get_ohlc_series symbol={sym_u} tf_raw={tf_raw!r} -> tf_s={tf_s}")
+
         if not sym_u or tf_s <= 0:
             return {
                 "symbol": sym_u,
@@ -817,9 +847,354 @@ class UIAPI:
                 "reason": "BAD_TIMEFRAME",
             }
 
+        # Tick timeframe: bootstrap from klines is not applicable (ticks are stream-only)
+        _tf_map = {
+            60: "1m",
+            300: "5m",
+            900: "15m",
+            3600: "1h",
+        }
+
+        def _bootstrap_from_klines(reason_if_ok: str = "BOOTSTRAP") -> Optional[dict]:
+            """Best-effort Binance klines bootstrap.
+
+            IMPORTANT (v2.3.11.6):
+              - UI must never wait for HTTP.
+              - We only return cached candles immediately.
+              - If cache is empty/stale, we schedule background fetch and return BOOTSTRAP_PENDING.
+              - Never writes to runtime; cache is process-local (in-memory).
+            """
+            interval = _tf_map.get(tf_s)
+            if not interval:
+                _log_throttled(
+                    f"uiapi.bootstrap.bad_tf.{sym_u}",
+                    "warning",
+                    f"UIAPI: BOOTSTRAP skipped (unsupported tf_s={tf_s} for symbol={sym_u})",
+                    interval_s=30.0,
+                )
+                return None
+
+            # init cache on UIAPI instance (process-local)
+            cache = getattr(self, "_ohlc_bootstrap_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                try:
+                    setattr(self, "_ohlc_bootstrap_cache", cache)
+                except Exception:
+                    pass
+
+            lock = getattr(self, "_ohlc_bootstrap_lock", None)
+            if not (hasattr(lock, "acquire") and hasattr(lock, "release")):
+                lock = threading.RLock()
+                try:
+                    setattr(self, "_ohlc_bootstrap_lock", lock)
+                except Exception:
+                    pass
+
+            inflight = getattr(self, "_ohlc_bootstrap_inflight", None)
+            if not isinstance(inflight, dict):
+                inflight = {}
+                try:
+                    setattr(self, "_ohlc_bootstrap_inflight", inflight)
+                except Exception:
+                    pass
+
+            # TTL for cache
+            try:
+                ttl_s = float(str(os.environ.get("MB_UI_OHLC_BOOTSTRAP_CACHE_TTL_S", "15")).strip() or "15")
+            except Exception:
+                ttl_s = 15.0
+
+            # Request throttle (avoid thread spam)
+            try:
+                req_min_gap_s = float(str(os.environ.get("MB_UI_OHLC_BOOTSTRAP_REQ_MIN_GAP_S", "2.0")).strip() or "2.0")
+            except Exception:
+                req_min_gap_s = 2.0
+
+            limit = int(max(1, min(int(max_candles or 300), 500)))
+            cache_key = f"{sym_u}|{tf_s}|{limit}"
+
+            now = time.time()
+
+            # 1) Serve from cache (fresh OR stale) to avoid flicker.
+            #    If stale -> still return immediately, but also schedule a refresh in background.
+            stale_payload = None
+            try:
+                with lock:
+                    ent = cache.get(cache_key)
+                    if isinstance(ent, dict) and isinstance(ent.get("candles"), list) and ent.get("candles"):
+                        ts = float(ent.get("ts") or 0.0)
+                        candles_cached = ent.get("candles") or []
+                        last_tick_cached = ent.get("last_tick_ts_ms")
+
+                        if (now - ts) <= ttl_s:
+                            return {
+                                "symbol": sym_u,
+                                "timeframe_s": tf_s,
+                                "source": "binance/klines",
+                                "last_tick_ts_ms": last_tick_cached,
+                                "candles": candles_cached,
+                                "reason": reason_if_ok,
+                            }
+
+                        # stale cache — return it (prevents chart jumping), but refresh in background
+                        stale_payload = {
+                            "symbol": sym_u,
+                            "timeframe_s": tf_s,
+                            "source": "binance/klines",
+                            "last_tick_ts_ms": last_tick_cached,
+                            "candles": candles_cached,
+                            "reason": "BOOTSTRAP_STALE",
+                        }
+            except Exception:
+                stale_payload = None
+
+            # 2) Cache miss or stale → schedule background fetch (non-blocking)
+            # Optional blocking warm-start (opt-in).
+            # Default behavior remains NON-BLOCKING (SSOT safety).
+            # Enable via: MB_UI_OHLC_BOOTSTRAP_BLOCKING_MS=800 (example)
+            try:
+                block_ms = int(str(os.environ.get("MB_UI_OHLC_BOOTSTRAP_BLOCKING_MS", "0")).strip() or "0")
+            except Exception:
+                block_ms = 0
+            if block_ms < 0:
+                block_ms = 0
+
+            if block_ms > 0 and stale_payload is None:
+                try:
+                    import urllib.request
+                    import urllib.parse
+
+                    params = {"symbol": sym_u, "interval": interval, "limit": str(limit)}
+                    url = "https://api.binance.com/api/v3/klines?" + urllib.parse.urlencode(params)
+
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "User-Agent": "MontrixBot/2.3.11.8 (bootstrap warm-start)",
+                            "Accept": "application/json",
+                        },
+                        method="GET",
+                    )
+
+                    timeout_s = min(7.0, max(0.2, float(block_ms) / 1000.0))
+                    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                        raw = resp.read()
+
+                    data = json.loads(raw.decode("utf-8", errors="replace"))
+                    if isinstance(data, list) and data:
+                        candles_out = []
+                        last_ts_ms = None
+                        for row in data:
+                            try:
+                                ts_open_ms = int(row[0])
+                                candles_out.append({
+                                    "ts_open_ms": ts_open_ms,
+                                    "o": float(row[1]),
+                                    "h": float(row[2]),
+                                    "l": float(row[3]),
+                                    "c": float(row[4]),
+                                    "n": 0,
+                                })
+                                last_ts_ms = ts_open_ms
+                            except Exception:
+                                continue
+
+                        if candles_out:
+                            with lock:
+                                cache[cache_key] = {
+                                    "ts": time.time(),
+                                    "last_tick_ts_ms": last_ts_ms,
+                                    "candles": candles_out,
+                                }
+
+                            return {
+                                "symbol": sym_u,
+                                "timeframe_s": tf_s,
+                                "source": "binance/klines",
+                                "last_tick_ts_ms": last_ts_ms,
+                                "candles": candles_out,
+                                "reason": "BOOTSTRAP_BLOCKING",
+                            }
+                except Exception:
+                    # If blocking warm-start fails, fall back to non-blocking behavior
+                    pass
+            def _schedule_fetch() -> None:
+                try:
+                    with lock:
+                        st = inflight.get(cache_key) or {}
+                        last_req = float(st.get("last_req_ts") or 0.0)
+                        running = bool(st.get("running"))
+                        if running:
+                            return
+                        if (now - last_req) < req_min_gap_s:
+                            return
+                        inflight[cache_key] = {"running": True, "last_req_ts": now}
+
+                    def _worker() -> None:
+                        try:
+                            import urllib.request
+                            import urllib.parse
+
+                            params = {"symbol": sym_u, "interval": interval, "limit": str(limit)}
+                            url = "https://api.binance.com/api/v3/klines?" + urllib.parse.urlencode(params)
+
+                            req = urllib.request.Request(
+                                url,
+                                headers={
+                                    "User-Agent": "MontrixBot/2.3.11.6 (read-only bootstrap)",
+                                    "Accept": "application/json",
+                                },
+                                method="GET",
+                            )
+
+                            with urllib.request.urlopen(req, timeout=7.0) as resp:
+                                raw = resp.read()
+
+                            data = json.loads(raw.decode("utf-8", errors="replace"))
+                            if not isinstance(data, list) or not data:
+                                return
+
+                            candles_out = []
+                            last_ts_ms = None
+                            for row in data:
+                                try:
+                                    ts_open_ms = int(row[0])
+                                    candles_out.append({
+                                        "ts_open_ms": ts_open_ms,
+                                        "o": float(row[1]),
+                                        "h": float(row[2]),
+                                        "l": float(row[3]),
+                                        "c": float(row[4]),
+                                        "n": 0,
+                                    })
+                                    last_ts_ms = ts_open_ms
+                                except Exception:
+                                    continue
+
+                            if not candles_out:
+                                return
+
+                            with lock:
+                                cache[cache_key] = {
+                                    "ts": time.time(),
+                                    "last_tick_ts_ms": last_ts_ms,
+                                    "candles": candles_out,
+                                }
+
+                            _log_throttled(
+                                f"uiapi.bootstrap.{sym_u}.{tf_s}",
+                                "info",
+                                f"UIAPI: BOOTSTRAP klines fetched {len(candles_out)} candles for {sym_u} ({interval})",
+                                interval_s=30.0,
+                            )
+                        except Exception:
+                            _log_throttled(
+                                f"uiapi.bootstrap_failed.{sym_u}.{tf_s}",
+                                "warning",
+                                f"UIAPI: BOOTSTRAP klines failed for {sym_u}",
+                                interval_s=30.0,
+                                exc_info=True,
+                            )
+                        finally:
+                            with lock:
+                                inflight[cache_key]["running"] = False
+
+                    threading.Thread(
+                        target=_worker,
+                        name=f"uiapi_ohlc_bootstrap_{sym_u}_{tf_s}",
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    return
+
+            _schedule_fetch()
+
+            # If we have stale cache, serve it to avoid flicker/jumps.
+            if stale_payload is not None:
+                return stale_payload
+
+            # Otherwise return a non-blocking placeholder
+            return {
+                "symbol": sym_u,
+                "timeframe_s": tf_s,
+                "source": "binance/klines",
+                "last_tick_ts_ms": None,
+                "candles": [],
+                "reason": "BOOTSTRAP_PENDING",
+            }
+
+        # 1) Try runtime ticks stream first (core-owned, read-only)
+        # v2.3.11.7 — performance: tail-read only last N lines + cache by file stat
+        def _tail_lines_utf8(path, *, max_lines: int, max_bytes: int = 2_000_000) -> list[str]:
+            """Read last max_lines lines without loading full file (best-effort)."""
+            try:
+                max_lines = int(max_lines)
+            except Exception:
+                max_lines = 5000
+            max_lines = max(1, max_lines)
+
+            try:
+                with path.open("rb") as f:
+                    try:
+                        f.seek(0, 2)
+                        end = f.tell()
+                    except Exception:
+                        end = 0
+
+                    if end <= 0:
+                        return []
+
+                    # read from the end in chunks
+                    chunk = 65536
+                    data = b""
+                    pos = end
+                    while pos > 0 and data.count(b"\n") <= max_lines and len(data) < int(max_bytes):
+                        read_sz = chunk if pos >= chunk else pos
+                        pos -= read_sz
+                        try:
+                            f.seek(pos)
+                        except Exception:
+                            break
+                        try:
+                            buf = f.read(read_sz)
+                        except Exception:
+                            break
+                        data = buf + data
+
+                    # keep only last N lines
+                    lines_b = data.splitlines()[-max_lines:]
+                    out = []
+                    for b in lines_b:
+                        try:
+                            out.append(b.decode("utf-8", errors="replace"))
+                        except Exception:
+                            continue
+                    return out
+            except Exception:
+                return []
+
+        # Cache: if ticks stream file did not change → reuse last computed candles (avoid CPU/UI stalls)
+        cache_key = (sym_u, int(tf_s), int(max_candles or 0), int(max_ticks or 0))
+        try:
+            _ticks_ohlc_cache = getattr(self, "_ticks_ohlc_cache", None)
+            if not isinstance(_ticks_ohlc_cache, dict):
+                _ticks_ohlc_cache = {}
+                try:
+                    setattr(self, "_ticks_ohlc_cache", _ticks_ohlc_cache)
+                except Exception:
+                    pass
+        except Exception:
+            _ticks_ohlc_cache = {}
+
         try:
             p = self._ticks_stream_path()
             if not p.exists():
+
+                # 2) Fallback to klines
+                boot = _bootstrap_from_klines("BOOTSTRAP")
+                if boot is not None:
+                    return boot
                 return {
                     "symbol": sym_u,
                     "timeframe_s": tf_s,
@@ -830,12 +1205,61 @@ class UIAPI:
                 }
 
             # Read tail (best-effort). We don't want to load the whole file.
-            with p.open("r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if max_ticks and len(lines) > int(max_ticks):
-                lines = lines[-int(max_ticks) :]
+            # v2.3.11.7: cache by file stat to avoid re-parsing when unchanged
+            try:
+                st = p.stat()
+                st_key = (int(getattr(st, "st_size", 0) or 0), int(getattr(st, "st_mtime_ns", 0) or 0))
+            except Exception:
+                st_key = None
+
+            try:
+                ent = _ticks_ohlc_cache.get(cache_key) if isinstance(_ticks_ohlc_cache, dict) else None
+            except Exception:
+                ent = None
+
+            # v2.3.11.7.1 — HARD cache-hit: if ticks file unchanged → return cached result (zero CPU)
+            try:
+                if st_key is not None and isinstance(ent, dict) and ent.get("st_key") == st_key:
+                    cached = ent.get("result")
+                    if isinstance(cached, dict):
+                        return cached
+            except Exception:
+                pass
+
+            # v2.3.11.7.2 — UI-throttle:
+            # If UI asks too frequently, serve last cached result even if file changed.
+            # This dramatically reduces CPU/IO and removes UI freezes.
+            try:
+                throttle_ms = int(os.environ.get("MB_UI_OHLC_THROTTLE_MS", "350") or "350")
+            except Exception:
+                throttle_ms = 350
+            throttle_ms = max(0, throttle_ms)
+
+            try:
+                now_mono = time.monotonic()
+            except Exception:
+                now_mono = None
+
+            try:
+                if throttle_ms > 0 and now_mono is not None and isinstance(ent, dict):
+                    last_served = ent.get("served_mono")
+                    cached = ent.get("result")
+                    if isinstance(last_served, (int, float)) and isinstance(cached, dict):
+                        if (now_mono - float(last_served)) * 1000.0 < float(throttle_ms):
+                            return cached
+            except Exception:
+                pass
+
+            lines = _tail_lines_utf8(p, max_lines=int(max_ticks or 5000))
+
+            # store raw tail cache info (computed later)
+            _pending_st_key = st_key
+
         except Exception:
-            log.exception("UIAPI: get_ohlc_series read failed")
+            log.exception("UIAPI: get_ohlc_series ticks_stream read failed")
+            boot = _bootstrap_from_klines("BOOTSTRAP")
+            if boot is not None:
+                return boot
             return {
                 "symbol": sym_u,
                 "timeframe_s": tf_s,
@@ -859,6 +1283,9 @@ class UIAPI:
             ticks.append(obj)
 
         if not ticks:
+            boot = _bootstrap_from_klines("BOOTSTRAP")
+            if boot is not None:
+                return boot
             return {
                 "symbol": sym_u,
                 "timeframe_s": tf_s,
@@ -874,6 +1301,63 @@ class UIAPI:
                 timeframe_ms=tf_s * 1000,
                 max_candles=max_candles,
             )
+            if not candles:
+                boot = _bootstrap_from_klines("BOOTSTRAP")
+                if boot is not None:
+                    return boot
+
+            # Anti-flicker (working, not dead code):
+            # If tick stream is present but not warmed up, prefer bootstrap to avoid flashing.
+            try:
+                min_warm = int(os.environ.get("MB_UI_OHLC_MIN_WARM_CANDLES", "10") or "10")
+            except Exception:
+                min_warm = 10
+            min_warm = max(0, int(min_warm or 0))
+
+            if min_warm > 0 and isinstance(candles, list) and len(candles) < min_warm:
+                boot = _bootstrap_from_klines("BOOTSTRAP_PREFERRED")
+                if boot is not None and isinstance(boot.get("candles"), list) and len(boot["candles"]) >= len(candles):
+                    return boot
+
+            result = {
+                "symbol": sym_u,
+                "timeframe_s": tf_s,
+                "source": "runtime/ticks_stream.jsonl",
+                "last_tick_ts_ms": last_ts,
+                "candles": candles,
+                "reason": "",
+            }
+
+            # store computed result into cache by file stat (if available)
+            try:
+                if isinstance(_ticks_ohlc_cache, dict):
+                    st_key2 = None
+                    try:
+                        st_key2 = _pending_st_key
+                    except Exception:
+                        st_key2 = None
+
+                    try:
+                        served_mono = time.monotonic()
+                    except Exception:
+                        served_mono = None
+
+                    if st_key2 is not None:
+                        _ticks_ohlc_cache[cache_key] = {
+                            "st_key": st_key2,
+                            "result": result,
+                            "served_mono": served_mono,
+                        }
+            except Exception:
+                pass
+
+            return result
+
+            if len(candles) < min_warm:
+                boot = _bootstrap_from_klines("BOOTSTRAP_PREFERRED")
+                if boot is not None and isinstance(boot.get("candles"), list) and len(boot["candles"]) >= len(candles):
+                    return boot
+
             return {
                 "symbol": sym_u,
                 "timeframe_s": tf_s,
@@ -884,6 +1368,9 @@ class UIAPI:
             }
         except Exception:
             log.exception("UIAPI: get_ohlc_series build failed")
+            boot = _bootstrap_from_klines("BOOTSTRAP")
+            if boot is not None:
+                return boot
             return {
                 "symbol": sym_u,
                 "timeframe_s": tf_s,

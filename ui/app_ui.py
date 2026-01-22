@@ -295,7 +295,7 @@ APP_TITLE = "MontrixBot"
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SAFE_FILE = ROOT_DIR / "SAFE_MODE"
 SCRIPTS_DIR = ROOT_DIR / "scripts"
-DEFAULT_SYMBOLS = ["ADAUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT"]
 
 # v2.2.34 — Stale marker threshold for top status line (read-only)
 STALE_STATUS_AGE_SEC = 30

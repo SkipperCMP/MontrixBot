@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
+import os
+import time
 import tkinter as tk
 from tkinter import messagebox
 
@@ -71,6 +73,50 @@ class ChartController:
         except Exception:
             return None
 
+    # ---------------------------------------------------------------- indicators (UI-only)
+
+    def _ui_indicators_enabled(self) -> bool:
+        """Return current UI indicator toggle (in-memory). Defaults to True."""
+        try:
+            v = getattr(self.app, "var_chart_indicators_on", None)
+            if v is None:
+                return True
+            return bool(v.get())
+        except Exception:
+            return True
+
+    def apply_ui_indicators_to_embedded(self) -> None:
+        """Apply UI toggle to embedded ChartPanel if present."""
+        panel = getattr(self, "_embedded_panel", None)
+        if panel is None:
+            return
+        try:
+            if hasattr(panel, "set_indicator_flags"):
+                on = self._ui_indicators_enabled()
+                panel.set_indicator_flags(enable_rsi=on, enable_macd=on)
+        except Exception:
+            return
+
+    def toggle_ui_indicators(self) -> None:
+        """Toggle Indicators ON/OFF (UI-only, no runtime writes)."""
+        try:
+            v = getattr(self.app, "var_chart_indicators_on", None)
+            if v is None:
+                return
+            new_val = not bool(v.get())
+            v.set(bool(new_val))
+        except Exception:
+            return
+
+        try:
+            label = getattr(self.app, "var_chart_indicators_label", None)
+            if label is not None:
+                label.set("Indicators: ON" if self._ui_indicators_enabled() else "Indicators: OFF")
+        except Exception:
+            pass
+
+        self.apply_ui_indicators_to_embedded()
+
     def open_candles_embedded(self, timeframe_s: int = 60) -> None:
         """Chart-first: run LIVE candles inside embedded Chart tab (no pop-up)."""
         panel = self._ensure_embedded_panel()
@@ -90,6 +136,16 @@ class ChartController:
         last_good_candles = None
         last_good_levels = None
         last_good_trades = None
+
+        # v2.3.11.6 — redraw throttle + gate (UI-only)
+        try:
+            _throttle_ms = int(str(os.environ.get("MB_UI_CHART_REDRAW_THROTTLE_MS", "350")).strip() or "350")
+        except Exception:
+            _throttle_ms = 350
+        _throttle_ms = max(250, min(500, _throttle_ms))
+
+        _last_render_ts_last = 0
+        _last_render_at_s = 0.0
 
         def refresh() -> None:
             nonlocal last_levels_sig, last_good_candles, last_good_levels, last_good_trades
@@ -320,17 +376,47 @@ class ChartController:
                         last_good_levels = levels
                         last_good_trades = trades_for_chart
 
-                    panel.plot_candles(
-                        candles,
-                        levels=levels,
-                        trades=trades_for_chart,
-                        debug_meta=debug_meta,
-                    )
+                    # v2.3.11.6 — redraw only on ts_last change + throttled (UI-only)
+                    try:
+                        now_s = time.time()
+                        ts_last_gate = 0
+                        try:
+                            if debug_meta and int(debug_meta.get("ts_last") or 0) > 0:
+                                ts_last_gate = int(debug_meta.get("ts_last") or 0)
+                        except Exception:
+                            ts_last_gate = 0
+
+                        do_draw = False
+                        if ts_last_gate > 0 and ts_last_gate != _last_render_ts_last:
+                            if (now_s - _last_render_at_s) * 1000.0 >= float(_throttle_ms):
+                                do_draw = True
+                        elif ts_last_gate <= 0:
+                            # unknown ts_last -> allow throttled draw
+                            if (now_s - _last_render_at_s) * 1000.0 >= float(_throttle_ms):
+                                do_draw = True
+
+                        if do_draw:
+                            _last_render_at_s = now_s
+                            if ts_last_gate > 0:
+                                _last_render_ts_last = ts_last_gate
+                            panel.plot_candles(
+                                candles,
+                                levels=levels,
+                                trades=trades_for_chart,
+                                debug_meta=debug_meta,
+                            )
+                    except Exception:
+                        panel.plot_candles(
+                            candles,
+                            levels=levels,
+                            trades=trades_for_chart,
+                            debug_meta=debug_meta,
+                        )
             except Exception:
                 pass
 
             try:
-                self.app.after(1000, refresh)
+                self.app.after(int(_throttle_ms), refresh)
             except Exception:
                 return
 
@@ -399,7 +485,7 @@ class ChartController:
             else:
                 # планируем следующий апдейт, пока окно живо
                 try:
-                    win.after(1000, refresh)
+                    win.after(int(_throttle_ms), refresh)
                 except Exception:
                     return
 
@@ -421,6 +507,16 @@ class ChartController:
         last_good_candles = None
         last_good_levels = None
         last_good_trades = None
+
+        # v2.3.11.6 — redraw throttle + gate (UI-only)
+        try:
+            _throttle_ms = int(str(os.environ.get("MB_UI_CHART_REDRAW_THROTTLE_MS", "350")).strip() or "350")
+        except Exception:
+            _throttle_ms = 350
+        _throttle_ms = max(250, min(500, _throttle_ms))
+
+        _last_render_ts_last = 0
+        _last_render_at_s = 0.0
 
         def refresh() -> None:
             nonlocal last_levels_sig
@@ -660,12 +756,42 @@ class ChartController:
                         last_good_levels = levels
                         last_good_trades = trades_for_chart
 
-                    panel.plot_candles(
-                        candles,
-                        levels=levels,
-                        trades=trades_for_chart,
-                        debug_meta=debug_meta,
-                    )
+                    # v2.3.11.6 — redraw only on ts_last change + throttled (UI-only)
+                    try:
+                        now_s = time.time()
+                        ts_last_gate = 0
+                        try:
+                            if debug_meta and int(debug_meta.get("ts_last") or 0) > 0:
+                                ts_last_gate = int(debug_meta.get("ts_last") or 0)
+                        except Exception:
+                            ts_last_gate = 0
+
+                        do_draw = False
+                        if ts_last_gate > 0 and ts_last_gate != _last_render_ts_last:
+                            if (now_s - _last_render_at_s) * 1000.0 >= float(_throttle_ms):
+                                do_draw = True
+                        elif ts_last_gate <= 0:
+                            # unknown ts_last -> allow throttled draw
+                            if (now_s - _last_render_at_s) * 1000.0 >= float(_throttle_ms):
+                                do_draw = True
+
+                        if do_draw:
+                            _last_render_at_s = now_s
+                            if ts_last_gate > 0:
+                                _last_render_ts_last = ts_last_gate
+                            panel.plot_candles(
+                                candles,
+                                levels=levels,
+                                trades=trades_for_chart,
+                                debug_meta=debug_meta,
+                            )
+                    except Exception:
+                        panel.plot_candles(
+                            candles,
+                            levels=levels,
+                            trades=trades_for_chart,
+                            debug_meta=debug_meta,
+                        )
 
             except Exception:
                 # UI-only: silently ignore render errors

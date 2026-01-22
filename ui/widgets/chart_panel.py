@@ -24,6 +24,8 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 
+import os
+
 # Matplotlib is optional. If missing, we will fallback to Canvas charts.
 try:
     import matplotlib
@@ -172,8 +174,32 @@ class ChartPanel(ttk.Frame):
         def __init__(self, master: tk.Misc, *, theme: Optional[Theme] = None) -> None:
             super().__init__(master)
 
+            def _env_bool(name: str, default: bool) -> bool:
+                try:
+                    raw = str(os.environ.get(name, "")).strip().lower()
+                except Exception:
+                    raw = ""
+                if raw == "":
+                    return bool(default)
+                return raw not in ("0", "false", "no", "off")
+
             self.theme = theme or Theme()
             self._use_mpl = Figure is not None and FigureCanvasTkAgg is not None
+
+            # UI feature flags (READ-ONLY; env only)
+            # - MB_UI_CHART_INDICATORS=0 disables BOTH RSI and MACD (fast path)
+            # - MB_UI_ENABLE_RSI / MB_UI_ENABLE_MACD override individually
+            base_ind = _env_bool("MB_UI_CHART_INDICATORS", True)
+            self._enable_rsi = _env_bool("MB_UI_ENABLE_RSI", base_ind)
+            self._enable_macd = _env_bool("MB_UI_ENABLE_MACD", base_ind)
+
+            # Cap for legacy tick chart (plot_price_series)
+            try:
+                self._max_ticks = int(str(os.environ.get("MB_UI_CHART_MAX_TICKS", "")).strip() or "0")
+            except Exception:
+                self._max_ticks = 0
+            if self._max_ticks < 0:
+                self._max_ticks = 0
 
             self._last_draw_ts = 0.0
 
@@ -194,6 +220,16 @@ class ChartPanel(ttk.Frame):
             self.ax_price = self.figure.add_subplot(3, 1, 1)
             self.ax_rsi = self.figure.add_subplot(3, 1, 2)
             self.ax_macd = self.figure.add_subplot(3, 1, 3)
+
+            # Optional: hide indicator panes entirely (still READ-ONLY)
+            try:
+                self.ax_rsi.set_visible(bool(self._enable_rsi))
+            except Exception:
+                pass
+            try:
+                self.ax_macd.set_visible(bool(self._enable_macd))
+            except Exception:
+                pass
 
             # Style axes
             for ax in (self.ax_price, self.ax_rsi, self.ax_macd):
@@ -289,8 +325,58 @@ class ChartPanel(ttk.Frame):
                 pass
             self._hud_artists = []
 
-        # ----------------------------- candles
+        # ----------------------------- UI-only toggles
 
+        def set_indicator_flags(self, *, enable_rsi: bool, enable_macd: bool) -> None:
+            """UI-only: enable/disable RSI/MACD without touching runtime state."""
+            try:
+                self._enable_rsi = bool(enable_rsi)
+            except Exception:
+                pass
+            try:
+                self._enable_macd = bool(enable_macd)
+            except Exception:
+                pass
+
+            # Hide/show panes
+            try:
+                self.ax_rsi.set_visible(bool(getattr(self, "_enable_rsi", True)))
+            except Exception:
+                pass
+            try:
+                self.ax_macd.set_visible(bool(getattr(self, "_enable_macd", True)))
+            except Exception:
+                pass
+
+            # Clear any previously drawn indicator artists
+            try:
+                self._line_rsi.set_data([], [])
+            except Exception:
+                pass
+            try:
+                self._line_macd.set_data([], [])
+                self._line_signal.set_data([], [])
+            except Exception:
+                pass
+            try:
+                if getattr(self, "_macd_hist", None) is not None:
+                    for b in self._macd_hist:
+                        try:
+                            b.remove()
+                        except Exception:
+                            pass
+                    self._macd_hist = None
+            except Exception:
+                pass
+
+            # Redraw (best-effort)
+            try:
+                if getattr(self, "_use_mpl", False) and hasattr(self, "canvas"):
+                    self.canvas.draw_idle()
+            except Exception:
+                pass
+
+        # ----------------------------- candles
         def plot_candles(
             self,
             candles: Sequence[dict],
@@ -591,24 +677,63 @@ class ChartPanel(ttk.Frame):
             except Exception:
                 pass
 
-            # RSI + MACD
+            # RSI + MACD (feature-flagged to reduce UI load)
             try:
-                rsi_vals = _rsi(closes, period=14)
-                macd_line, signal_line, hist = _macd(closes)
-
-                if rsi_vals:
-                    xs_rsi = xs[-len(rsi_vals) :]
-                    self._line_rsi.set_data(xs_rsi, rsi_vals)
-                    self.ax_rsi.set_ylim(0, 100)
+                if getattr(self, "_enable_rsi", True):
+                    rsi_vals = _rsi(closes, period=14)
+                    if rsi_vals:
+                        xs_rsi = xs[-len(rsi_vals) :]
+                        self._line_rsi.set_data(xs_rsi, rsi_vals)
+                        try:
+                            self.ax_rsi.set_ylim(0, 100)
+                        except Exception:
+                            pass
+                    else:
+                        self._line_rsi.set_data([], [])
                 else:
+                    # fast path: no compute
                     self._line_rsi.set_data([], [])
+            except Exception:
+                pass
 
-                if macd_line and signal_line:
-                    xs_macd = xs[-len(macd_line) :]
-                    self._line_macd.set_data(xs_macd, macd_line)
-                    self._line_signal.set_data(xs_macd, signal_line)
+            try:
+                if getattr(self, "_enable_macd", True):
+                    macd_line, signal_line, hist = _macd(closes)
+                    if macd_line and signal_line:
+                        xs_macd = xs[-len(macd_line) :]
+                        self._line_macd.set_data(xs_macd, macd_line)
+                        self._line_signal.set_data(xs_macd, signal_line)
 
-                    # hist bars (clear / redraw)
+                        # hist bars (clear / redraw)
+                        try:
+                            if self._macd_hist is not None:
+                                for b in self._macd_hist:
+                                    try:
+                                        b.remove()
+                                    except Exception:
+                                        pass
+                                self._macd_hist = None
+                        except Exception:
+                            pass
+                        try:
+                            bars = []
+                            for i in range(len(hist)):
+                                h = hist[i]
+                                x = xs_macd[i]
+                                col = self.theme.hist_pos if h >= 0 else self.theme.hist_neg
+                                bar = self.ax_macd.bar([x], [h], width=0.65, alpha=0.65, color=col)
+                                for b in bar:
+                                    bars.append(b)
+                            self._macd_hist = bars
+                        except Exception:
+                            pass
+                    else:
+                        self._line_macd.set_data([], [])
+                        self._line_signal.set_data([], [])
+                else:
+                    # fast path: no compute + clear previous bars
+                    self._line_macd.set_data([], [])
+                    self._line_signal.set_data([], [])
                     try:
                         if self._macd_hist is not None:
                             for b in self._macd_hist:
@@ -619,22 +744,6 @@ class ChartPanel(ttk.Frame):
                             self._macd_hist = None
                     except Exception:
                         pass
-                    try:
-                        bars = []
-                        for i in range(len(hist)):
-                            h = hist[i]
-                            x = xs_macd[i]
-                            col = self.theme.hist_pos if h >= 0 else self.theme.hist_neg
-                            bar = self.ax_macd.bar([x], [h], width=0.65, alpha=0.65, color=col)
-                            # bar is a container
-                            for b in bar:
-                                bars.append(b)
-                        self._macd_hist = bars
-                    except Exception:
-                        pass
-                else:
-                    self._line_macd.set_data([], [])
-                    self._line_signal.set_data([], [])
             except Exception:
                 pass
 
@@ -765,8 +874,22 @@ class ChartPanel(ttk.Frame):
                     pass
                 return
 
-            # store
+            # store (optionally capped)
             self._prices = list(prices or [])
+
+            try:
+                cap = int(getattr(self, "_max_ticks", 0) or 0)
+            except Exception:
+                cap = 0
+
+            if cap and cap > 0 and len(self._prices) > cap:
+                self._prices = self._prices[-cap:]
+                try:
+                    ts_ms = list(ts_ms or [])
+                    if len(ts_ms) > cap:
+                        ts_ms = ts_ms[-cap:]
+                except Exception:
+                    pass
 
             xs = list(range(len(self._prices)))
             ys = self._prices
