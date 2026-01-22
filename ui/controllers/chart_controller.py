@@ -75,46 +75,121 @@ class ChartController:
 
     # ---------------------------------------------------------------- indicators (UI-only)
 
-    def _ui_indicators_enabled(self) -> bool:
-        """Return current UI indicator toggle (in-memory). Defaults to True."""
+    def _ui_rsi_enabled(self) -> bool:
         try:
-            v = getattr(self.app, "var_chart_indicators_on", None)
+            v = getattr(self.app, "var_chart_rsi_on", None)
             if v is None:
                 return True
             return bool(v.get())
         except Exception:
             return True
 
+    def _ui_macd_enabled(self) -> bool:
+        try:
+            v = getattr(self.app, "var_chart_macd_on", None)
+            if v is None:
+                return True
+            return bool(v.get())
+        except Exception:
+            return True
+
+    def _refresh_indicator_labels(self) -> None:
+        """Update button labels: Indicators (ON/OFF/MIX), RSI, MACD."""
+        rsi_on = self._ui_rsi_enabled()
+        macd_on = self._ui_macd_enabled()
+
+        # RSI / MACD labels
+        try:
+            v = getattr(self.app, "var_chart_rsi_label", None)
+            if v is not None:
+                v.set("RSI: ON" if rsi_on else "RSI: OFF")
+        except Exception:
+            pass
+        try:
+            v = getattr(self.app, "var_chart_macd_label", None)
+            if v is not None:
+                v.set("MACD: ON" if macd_on else "MACD: OFF")
+        except Exception:
+            pass
+
+        # Master label
+        try:
+            lab = getattr(self.app, "var_chart_indicators_label", None)
+            if lab is not None:
+                if rsi_on and macd_on:
+                    lab.set("Indicators: ON")
+                elif (not rsi_on) and (not macd_on):
+                    lab.set("Indicators: OFF")
+                else:
+                    lab.set("Indicators: MIX")
+        except Exception:
+            pass
+
+        # Keep legacy bool var (best-effort)
+        try:
+            legacy = getattr(self.app, "var_chart_indicators_on", None)
+            if legacy is not None:
+                legacy.set(bool(rsi_on and macd_on))
+        except Exception:
+            pass
+
     def apply_ui_indicators_to_embedded(self) -> None:
-        """Apply UI toggle to embedded ChartPanel if present."""
+        """Apply UI indicator toggles (RSI/MACD) to embedded ChartPanel."""
         panel = getattr(self, "_embedded_panel", None)
         if panel is None:
             return
         try:
             if hasattr(panel, "set_indicator_flags"):
-                on = self._ui_indicators_enabled()
-                panel.set_indicator_flags(enable_rsi=on, enable_macd=on)
+                panel.set_indicator_flags(enable_rsi=self._ui_rsi_enabled(), enable_macd=self._ui_macd_enabled())
         except Exception:
             return
 
+    # Backward-compatible name (old button, old callers)
     def toggle_ui_indicators(self) -> None:
-        """Toggle Indicators ON/OFF (UI-only, no runtime writes)."""
+        self.toggle_ui_indicators_master()
+
+    def toggle_ui_indicators_master(self) -> None:
+        """Master toggle:
+        - if both ON -> turn both OFF
+        - else -> turn both ON
+        """
         try:
-            v = getattr(self.app, "var_chart_indicators_on", None)
-            if v is None:
+            rsi = getattr(self.app, "var_chart_rsi_on", None)
+            macd = getattr(self.app, "var_chart_macd_on", None)
+            if rsi is None or macd is None:
                 return
-            new_val = not bool(v.get())
-            v.set(bool(new_val))
+            both_on = bool(rsi.get()) and bool(macd.get())
+            new_val = not both_on
+            rsi.set(bool(new_val))
+            macd.set(bool(new_val))
         except Exception:
             return
 
-        try:
-            label = getattr(self.app, "var_chart_indicators_label", None)
-            if label is not None:
-                label.set("Indicators: ON" if self._ui_indicators_enabled() else "Indicators: OFF")
-        except Exception:
-            pass
+        self._refresh_indicator_labels()
+        self.apply_ui_indicators_to_embedded()
 
+    def toggle_ui_rsi(self) -> None:
+        try:
+            rsi = getattr(self.app, "var_chart_rsi_on", None)
+            if rsi is None:
+                return
+            rsi.set(not bool(rsi.get()))
+        except Exception:
+            return
+
+        self._refresh_indicator_labels()
+        self.apply_ui_indicators_to_embedded()
+
+    def toggle_ui_macd(self) -> None:
+        try:
+            macd = getattr(self.app, "var_chart_macd_on", None)
+            if macd is None:
+                return
+            macd.set(not bool(macd.get()))
+        except Exception:
+            return
+
+        self._refresh_indicator_labels()
         self.apply_ui_indicators_to_embedded()
 
     def open_candles_embedded(self, timeframe_s: int = 60) -> None:
@@ -124,6 +199,13 @@ class ChartController:
             # fallback to legacy pop-out behavior
             self.open_candles_live_chart(timeframe_s)
             return
+
+        # Apply current UI indicator toggles immediately on open
+        try:
+            self._refresh_indicator_labels()
+        except Exception:
+            pass
+        self.apply_ui_indicators_to_embedded()
 
         # mark running and store TF; reuse existing refresh loop via app.after
         self._embedded_running = True

@@ -122,17 +122,35 @@ def build_topbar_ui(app: Any, symbols: Sequence[str]) -> None:
     if not hasattr(app, "var_chart_timeframe"):
         app.var_chart_timeframe = tk.StringVar(value="1m")
 
-    # --- UI toggle: Indicators (RSI/MACD) ---
-    # In-memory only (READ-ONLY): does not write runtime state.
+    # --- UI toggles: Indicators / RSI / MACD (session-only, READ-ONLY) ---
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = str(os.environ.get(name, "")).strip().lower()
+        if raw == "":
+            return bool(default)
+        return raw not in ("0", "false", "no", "off")
+
+    # Master default: MB_UI_CHART_INDICATORS
+    base_on = _env_bool("MB_UI_CHART_INDICATORS", True)
+
+    # Per-indicator defaults can be overridden by env
+    rsi_on_default = _env_bool("MB_UI_ENABLE_RSI", base_on)
+    macd_on_default = _env_bool("MB_UI_ENABLE_MACD", base_on)
+
+    if not hasattr(app, "var_chart_rsi_on"):
+        app.var_chart_rsi_on = tk.BooleanVar(value=bool(rsi_on_default))
+    if not hasattr(app, "var_chart_macd_on"):
+        app.var_chart_macd_on = tk.BooleanVar(value=bool(macd_on_default))
+
+    # Keep old var for compatibility (not authoritative if MIX)
     if not hasattr(app, "var_chart_indicators_on"):
-        raw = str(os.environ.get("MB_UI_CHART_INDICATORS", "")).strip().lower()
-        default_on = True if raw == "" else (raw not in ("0", "false", "no", "off"))
-        app.var_chart_indicators_on = tk.BooleanVar(value=bool(default_on))
+        app.var_chart_indicators_on = tk.BooleanVar(value=bool(base_on))
 
     if not hasattr(app, "var_chart_indicators_label"):
-        app.var_chart_indicators_label = tk.StringVar(
-            value=("Indicators: ON" if bool(app.var_chart_indicators_on.get()) else "Indicators: OFF")
-        )
+        app.var_chart_indicators_label = tk.StringVar(value="Indicators: ON")
+    if not hasattr(app, "var_chart_rsi_label"):
+        app.var_chart_rsi_label = tk.StringVar(value="RSI: ON")
+    if not hasattr(app, "var_chart_macd_label"):
+        app.var_chart_macd_label = tk.StringVar(value="MACD: ON")
 
     # Статус переносим в ОТДЕЛЬНУЮ строку под кнопками.
     status_row = ttk.Frame(app, style="Dark.TFrame")
@@ -465,5 +483,19 @@ def build_paths_ui(app: Any) -> None:
         box,
         textvariable=app.var_chart_indicators_label,
         style="Dark.TButton",
-        command=getattr(app.chart_controller, "toggle_ui_indicators", None),
+        command=getattr(app.chart_controller, "toggle_ui_indicators_master", None),
+    ).pack(side="left", padx=4)
+
+    ttk.Button(
+        box,
+        textvariable=app.var_chart_rsi_label,
+        style="Dark.TButton",
+        command=getattr(app.chart_controller, "toggle_ui_rsi", None),
+    ).pack(side="left", padx=4)
+
+    ttk.Button(
+        box,
+        textvariable=app.var_chart_macd_label,
+        style="Dark.TButton",
+        command=getattr(app.chart_controller, "toggle_ui_macd", None),
     ).pack(side="left", padx=4)
