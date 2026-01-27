@@ -232,29 +232,68 @@ def open_signals_window(
 
     heatmap_var.trace_add("write", lambda *_: _on_heatmap_toggle())
 
+    def _fmt_ts(ts) -> str:
+        """
+        TS can be:
+          - seconds (int/float)
+          - milliseconds (int/float, very large)
+          - numeric string
+        Windows localtime() may raise OSError on out-of-range values.
+        """
+        if ts is None:
+            return ""
+        try:
+            # numeric string
+            if isinstance(ts, str):
+                s = ts.strip()
+                if s.isdigit():
+                    ts = int(s)
+                else:
+                    return s
+
+            if isinstance(ts, (int, float)):
+                v = float(ts)
+
+                # Heuristic: treat big values as ms
+                # 1e12 ~ 2001-09 in ms; anything above is definitely ms
+                if v >= 1e12:
+                    v = v / 1000.0
+                # also treat "future-ish" seconds as ms (safety net)
+                elif v >= 2e10:
+                    v = v / 1000.0
+
+                # clamp to avoid Windows OSError for extreme ranges
+                if v < 0:
+                    v = 0.0
+
+                try:
+                    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v))
+                except Exception:
+                    return str(int(v))
+        except Exception:
+            pass
+
+        return str(ts)
+
     # свежие записи показываем сверху
     for obj in reversed(records):
-        ts = obj.get("ts")
-        if isinstance(ts, (int, float)):
-            ts_str = time.strftime(
-                "%Y-%m-%d %H:%M:%S",
-                time.localtime(ts),
-            )
-        else:
-            ts_str = str(ts or "")
-
+        ts_str = _fmt_ts(obj.get("ts"))
         sym = str(obj.get("symbol") or "")
         side = str(obj.get("side") or obj.get("status") or "")
         rsi = _fmt_float(obj.get("rsi"), "{:.2f}")
         macd = _fmt_float(obj.get("macd"))
-        macd_sig = _fmt_float(obj.get("macd_sig"))
+        macd_sig = _fmt_float(obj.get("macd_sig") if obj.get("macd_sig") is not None else obj.get("macd_signal"))
         scout_note = obj.get("scout_note") if isinstance(obj, dict) else None
         prio = ""
-        if isinstance(scout_note, dict):
-            try:
-                prio = str(scout_note.get("priority") or "")
-            except Exception:
-                prio = ""
+
+        # priority may live either on top-level or inside scout_note
+        try:
+            if isinstance(obj, dict) and obj.get("priority"):
+                prio = str(obj.get("priority"))
+            elif isinstance(scout_note, dict) and scout_note.get("priority"):
+                prio = str(scout_note.get("priority"))
+        except Exception:
+            prio = ""
 
         reason = str(obj.get("reason") or obj.get("note") or "")
         values = (ts_str, sym, side, rsi, macd, macd_sig, prio, reason)

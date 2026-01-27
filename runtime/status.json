@@ -11,7 +11,7 @@
       "MODE_MANUAL_ONLY"
     ],
     "evidence": [
-      "status:ts=1769507536",
+      "status:ts=1769537238",
       "policy:file=runtime/autonomy_policy.json",
       "fsm:file=runtime/trading_fsm.json",
       "policy:mode=MANUAL_ONLY",
@@ -22,8 +22,8 @@
       "position:open=0"
     ]
   },
-  "ts": 1769507536,
-  "ts_utc": "2026-01-27T09:52:16.572613+00:00",
+  "ts": 1769537238,
+  "ts_utc": "2026-01-27T18:07:18.377513+00:00",
   "source": "status_service",
   "gate_last": {
     "decision": "VETO",
@@ -31,7 +31,7 @@
       "MODE_MANUAL_ONLY"
     ],
     "evidence": [
-      "status:ts=1769507536",
+      "status:ts=1769537238",
       "policy:file=runtime/autonomy_policy.json",
       "fsm:file=runtime/trading_fsm.json",
       "policy:mode=MANUAL_ONLY",
@@ -42,6 +42,6 @@
       "position:open=0"
     ],
     "source": "gate_engine",
-    "ts_utc": "2026-01-27T09:52:16.572613+00:00"
+    "ts_utc": "2026-01-27T18:07:18.377513+00:00"
   }
 }

@@ -279,6 +279,8 @@ class AutoSimEngine:
             log.debug("autosim: position already removed from active_positions")
         self._recalc_equity()
 
+        return order_event
+
     # ----------------- основная точка входа -----------------
 
     def process(

@@ -110,11 +110,28 @@ class PositionsController:
         except Exception:
             core_active = []
 
-        # --- выбираем источник: ядро > AUTOSIM ---
-        if core_active:
-            active = core_active
-        else:
-            active = autosim_active
+        # --- объединяем источники: ядро + AUTOSIM ---
+        # Цель: показывать ВСЕ активные позиции.
+        # Приоритет: core-строка перекрывает autosim-строку того же symbol.
+        merged_by_symbol: dict[str, dict] = {}
+
+        try:
+            for p in autosim_active or []:
+                sym = str((p or {}).get("symbol") or "").upper()
+                if sym:
+                    merged_by_symbol[sym] = dict(p)
+        except Exception:
+            pass
+
+        try:
+            for p in core_active or []:
+                sym = str((p or {}).get("symbol") or "").upper()
+                if sym:
+                    merged_by_symbol[sym] = dict(p)
+        except Exception:
+            pass
+
+        active = list(merged_by_symbol.values())
 
         # если совсем пусто — рисуем дефолтный текст
         if not active:

@@ -1349,22 +1349,6 @@ class App(tk.Tk):
                 style="Muted.TLabel",
             ).pack(anchor="w", padx=8, pady=8)
 
-        # v2.3.1 — Portfolio Dashboard (read-only)
-        # Passive UI widget: updated via EventBus EVT_SNAPSHOT only.
-        try:
-            from ui.widgets.portfolio_dashboard import PortfolioDashboard
-
-            dash = PortfolioDashboard(tab_portfolio)
-            dash.frame.pack(fill="both", expand=True, padx=8, pady=8)
-            self.portfolio_dashboard = dash
-        except Exception as e:
-            self.portfolio_dashboard = None
-            ttk.Label(
-                tab_portfolio,
-                text=f"Portfolio Dashboard unavailable: {e}",
-                style="Muted.TLabel",
-            ).pack(anchor="w", padx=8, pady=8)
-
         # Placeholders / mounts (read-only)
         from ui.strategy_registry import build_strategy_registry_tab
         build_strategy_registry_tab(self, tab_strategies, open_journal_cb=self._ui_deeplink_open_sim_journal)
@@ -2822,9 +2806,21 @@ class App(tk.Tk):
                             if "hold_seconds" in tr:
                                 rec["hold_seconds"] = tr.get("hold_seconds")
 
-                            # core-owned persistence
-                            if api2 is not None and hasattr(api2, "persist_trade_record"):
-                                api2.persist_trade_record(rec)
+                            # core-owned journal bridge (TradeBook, in-memory)
+                            try:
+                                if api2 is not None and hasattr(api2, "state"):
+                                    tb = getattr(api2.state, "tradebook", None)
+                                    if tb is not None:
+                                        side_u = str(rec.get("side") or "").upper()
+                                        sym = rec.get("symbol")
+                                        price = rec.get("price")
+                                        qty = rec.get("qty")
+                                        if side_u == "BUY":
+                                            tb.open(symbol=sym, price=price, qty=qty, side=side_u)
+                                        elif side_u == "SELL":
+                                            tb.close(symbol=sym, price=price, reason=str(rec.get("reason") or "CLOSE"))
+                            except Exception:
+                                pass
 
                             # keep UI buffer update (existing behavior)
                             try:
@@ -3118,15 +3114,10 @@ class App(tk.Tk):
                     # не критично — просто не будет первичной загрузки
                     pass
 
-                # 2) Fallback: подхватываем историю через UIAPI (in-memory recent trades)
-                try:
-                    api = self._ensure_uiapi()
-                    if api is not None and hasattr(api, "get_recent_trades"):
-                        rows = api.get_recent_trades() or []
-                        if rows and hasattr(journal, "update"):
-                            journal.update(rows)
-                except Exception:
-                    pass
+                # 2) IMPORTANT:
+                # Do NOT overwrite DealsJournal (TradeBook snapshot) with legacy recent_trades buffer.
+                # recent_trades usually contains only BUY/OPEN intents and breaks the combined view.
+                pass
 
                 return
             except Exception as exc:  # noqa: BLE001

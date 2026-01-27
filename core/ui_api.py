@@ -551,6 +551,357 @@ class UIAPI:
             return []
 
     # ==============================
+    #   SIM MULTI-SYMBOL SCANNER (v2.3.21)
+    # ==============================
+    def _sim_watchlist_default(self) -> list[str]:
+        # безопасный дефолт: популярные + то, что обычно тестируется
+        return ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT"]
+
+    def _get_sim_watchlist(self) -> list[str]:
+        """
+        Watchlist sources (merged, not exclusive):
+        1) ENV MB_SIM_WATCHLIST="BTCUSDT,ADAUSDT,SOLUSDT"
+        2) UIAPI.symbols (configured list)
+        3) current UI symbol (best-effort)
+        4) open positions symbols from TPSL (preferred) + from state.snapshot() if present
+        5) fallback default list
+        """
+        out: list[str] = []
+
+        # 1) ENV override (merged)
+        try:
+            raw = str(os.environ.get("MB_SIM_WATCHLIST", "") or "").strip()
+            if raw:
+                parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
+                out.extend(parts)
+        except Exception:
+            pass
+
+        # 2) configured symbols on UIAPI
+        try:
+            syms = getattr(self, "symbols", None)
+            if isinstance(syms, list):
+                for s in syms:
+                    ss = str(s or "").strip().upper()
+                    if ss:
+                        out.append(ss)
+        except Exception:
+            pass
+
+        # 3) current symbol (pushed by UI)
+        try:
+            cur = str(getattr(self, "_current_symbol", "") or "").strip().upper()
+            if cur:
+                out.append(cur)
+        except Exception:
+            pass
+
+        # 4a) open positions from TPSL (preferred, matches UI Active positions)
+        try:
+            if getattr(self, "tpsl", None) is not None:
+                pos_dict = getattr(self.tpsl, "_pos", None)
+                if isinstance(pos_dict, dict):
+                    for sym in pos_dict.keys():
+                        ss = str(sym or "").strip().upper()
+                        if ss:
+                            out.append(ss)
+        except Exception:
+            pass
+
+        # 4b) best-effort: state snapshot positions (if present in some builds)
+        try:
+            snap = {}
+            try:
+                snap = self.state.snapshot() if hasattr(self, "state") and self.state is not None else {}
+            except Exception:
+                snap = {}
+
+            positions = snap.get("positions") if isinstance(snap, dict) else None
+            if isinstance(positions, dict):
+                for sym in positions.keys():
+                    ss = str(sym or "").strip().upper()
+                    if ss:
+                        out.append(ss)
+        except Exception:
+            pass
+
+        # 5) fallback default list
+        if not out:
+            out = list(self._sim_watchlist_default())
+
+        # normalize unique (stable)
+        uniq: list[str] = []
+        seen = set()
+        for s in out:
+            ss = str(s or "").strip().upper()
+            if not ss or ss in seen:
+                continue
+            seen.add(ss)
+            uniq.append(ss)
+
+        # cap to avoid too much background work
+        try:
+            cap = int(str(os.environ.get("MB_SIM_WATCHLIST_MAX", "12")).strip() or "12")
+        except Exception:
+            cap = 12
+        if cap <= 0:
+            cap = 12
+
+        return uniq[:cap]
+
+    def ensure_sim_scanner_started(self) -> None:
+        """
+        Start background thread that periodically computes RSI/MACD signals for watchlist symbols
+        and pushes them into UIAPI recent_signals (and persists via core.signal_store).
+        Idempotent.
+        """
+        try:
+            if getattr(self, "_sim_scanner_started", False):
+                return
+        except Exception:
+            pass
+
+        try:
+            self._sim_scanner_stop = threading.Event()
+        except Exception:
+            return
+
+        def _runner() -> None:
+            try:
+                self._sim_scanner_loop()
+            except Exception:
+                _log_throttled(
+                    "uiapi.sim_scanner.loop",
+                    "warning",
+                    "UIAPI: SIM multi-symbol scanner loop crashed (ignored)",
+                    interval_s=30.0,
+                    exc_info=True,
+                )
+
+        try:
+            th = threading.Thread(target=_runner, name="mb.sim_scanner", daemon=True)
+            self._sim_scanner_thread = th
+            self._sim_scanner_started = True
+            th.start()
+        except Exception:
+            # if thread start fails, do not mark started
+            try:
+                self._sim_scanner_started = False
+            except Exception:
+                pass
+
+    def stop_sim_scanner(self) -> None:
+        """Best-effort stop (mainly for tests/dev)."""
+        try:
+            ev = getattr(self, "_sim_scanner_stop", None)
+            if ev is not None:
+                ev.set()
+        except Exception:
+            pass
+
+    def _sim_scanner_loop(self) -> None:
+        # lazy imports to keep UIAPI import cost low
+        try:
+            from core import indicators as IND  # type: ignore
+        except Exception:
+            IND = None  # type: ignore
+
+        try:
+            from core import signals as SIG  # type: ignore
+        except Exception:
+            SIG = None  # type: ignore
+
+        try:
+            from core.signal_store import append_signal_record  # type: ignore
+        except Exception:
+            append_signal_record = None  # type: ignore
+
+        # throttle params
+        try:
+            interval_s = float(str(os.environ.get("MB_SIM_SCANNER_INTERVAL_S", "5")).strip() or "5")
+        except Exception:
+            interval_s = 5.0
+        if interval_s < 1.0:
+            interval_s = 1.0
+
+        try:
+            emit_keepalive_s = float(str(os.environ.get("MB_SIM_SIGNAL_KEEPALIVE_S", "60")).strip() or "60")
+        except Exception:
+            emit_keepalive_s = 60.0
+        if emit_keepalive_s < 10.0:
+            emit_keepalive_s = 10.0
+
+        # per-symbol last side + last emit ts
+        try:
+            last_side = getattr(self, "_sim_scanner_last_side", None)
+            if not isinstance(last_side, dict):
+                last_side = {}
+                setattr(self, "_sim_scanner_last_side", last_side)
+        except Exception:
+            last_side = {}
+
+        try:
+            last_emit = getattr(self, "_sim_scanner_last_emit", None)
+            if not isinstance(last_emit, dict):
+                last_emit = {}
+                setattr(self, "_sim_scanner_last_emit", last_emit)
+        except Exception:
+            last_emit = {}
+
+        # main loop
+        while True:
+            try:
+                if getattr(self, "_sim_scanner_stop", None) is not None and self._sim_scanner_stop.is_set():
+                    return
+            except Exception:
+                pass
+
+            syms = self._get_sim_watchlist()
+
+            now = time.time()
+
+            for sym in syms:
+                # Build candles from stream or bootstrap cache (non-blocking)
+                try:
+                    ohlc = self.get_ohlc_series(sym, 60, max_candles=300, max_ticks=5000)
+                except Exception:
+                    continue
+
+                candles = ohlc.get("candles") if isinstance(ohlc, dict) else None
+                if not isinstance(candles, list) or len(candles) < 40:
+                    continue
+
+                closes: list[float] = []
+                for c in candles:
+                    try:
+                        closes.append(float(c.get("c")))
+                    except Exception:
+                        continue
+                if len(closes) < 40:
+                    continue
+
+                if IND is None or SIG is None:
+                    continue
+
+                # indicators
+                try:
+                    rsi_series = IND.rsi(closes, period=14)
+                    macd_line, macd_sig_line = IND.macd(closes, fast=12, slow=26, signal=9)
+                    if not rsi_series or not macd_line or not macd_sig_line:
+                        continue
+                    rsi_last = float(rsi_series[-1])
+                    macd_last = float(macd_line[-1])
+                    macd_sig_last = float(macd_sig_line[-1])
+                except Exception:
+                    continue
+
+                # EMA for filter-chain context
+                ema_fast_last = None
+                ema_slow_last = None
+                try:
+                    ema_fast = IND.ema(closes, period=20)
+                    ema_slow = IND.ema(closes, period=50)
+                    if ema_fast:
+                        ema_fast_last = float(ema_fast[-1])
+                    if ema_slow:
+                        ema_slow_last = float(ema_slow[-1])
+                except Exception:
+                    pass
+
+                price_last = None
+                try:
+                    price_last = float(closes[-1])
+                except Exception:
+                    price_last = None
+
+                sig_obj = None
+                try:
+                    sig_obj = SIG.simple_rsi_macd_signal(
+                        rsi_last,
+                        macd_last,
+                        macd_sig_last,
+                        symbol=sym,
+                        ema_fast_last=ema_fast_last,
+                        ema_slow_last=ema_slow_last,
+                        price_last=price_last,
+                    )
+                except Exception:
+                    sig_obj = None
+
+                if sig_obj is None:
+                    continue
+
+                d = sig_obj.as_dict() if hasattr(sig_obj, "as_dict") else {}
+                side = str(d.get("side", "HOLD") or "HOLD").upper()
+                reason = str(d.get("reason", "") or "")
+
+                # priority heuristics (UI column "Prio")
+                prio = "INFO"
+                try:
+                    if side in ("BUY", "SELL"):
+                        # extreme RSI or strong MACD divergence -> RISK
+                        if abs(float(d.get("rsi", 50.0)) - 50.0) >= 40.0:
+                            prio = "RISK"
+                        else:
+                            prio = "WARNING"
+                except Exception:
+                    prio = "INFO"
+
+                # emit only on side-change OR keepalive for BUY/SELL
+                prev = str(last_side.get(sym, "HOLD") or "HOLD").upper()
+                prev_emit = float(last_emit.get(sym, 0.0) or 0.0)
+
+                should_emit = False
+                if side != prev:
+                    should_emit = True
+                elif side in ("BUY", "SELL") and (now - prev_emit) >= emit_keepalive_s:
+                    should_emit = True
+
+                if not should_emit:
+                    continue
+
+                last_side[sym] = side
+                last_emit[sym] = now
+
+                rec = {
+                    "ts": int(now * 1000),
+                    "symbol": sym,
+                    "side": side,
+                    "rsi": d.get("rsi"),
+                    "macd": d.get("macd"),
+                    "macd_sig": d.get("macd_signal"),
+                    "reason": reason,
+                    "priority": prio,
+                    "source": "sim_scanner",
+                }
+
+                # push into UI buffer
+                try:
+                    self.add_recent_signal(rec)
+                except Exception:
+                    pass
+
+                # persist (core-owned)
+                if append_signal_record is not None:
+                    try:
+                        append_signal_record(dict(rec))
+                    except Exception:
+                        pass
+
+            # heartbeat (optional)
+            try:
+                from core.heartbeats import beat  # type: ignore
+                beat("sim_scanner", now)
+            except Exception:
+                pass
+
+            # sleep
+            try:
+                time.sleep(interval_s)
+            except Exception:
+                time.sleep(1.0)
+
+    # ==============================
     #   UI Runtime Isolation (HARD-1A)
     #   UI must NOT read/write runtime files directly
     # ==============================
@@ -1814,7 +2165,12 @@ class UIAPI:
             "heartbeats": hb.snapshot(),
             "market_stats": self.get_market_stats(),
             "ts": int(time.time() * 1000),
-            # NEW: recent-журналы для UI
+
+            # NEW: TradeBook deals rows (preferred for DealsJournal)
+            # StateEngine.snapshot() already provides "deals_rows" via TradeBook.export_rows().
+            "deals_rows": core_snap.get("deals_rows") or [],
+
+            # NEW: recent-журналы для UI (legacy fallback)
             "signals_recent": self.get_recent_signals(),
             "trades_recent": self.get_recent_trades(),
         }
@@ -2485,4 +2841,13 @@ def build_ui_bridge(executor_mode: str = "SIM", enable_tpsl: bool = True) -> UIA
             tpsl = None
 
     api = UIAPI(state, executor, tpsl=tpsl)
+
+    # v2.3.21 — Multi-Symbol SIM Scanner (watchlist signals)
+    # Run in background for SIM mode to populate Signals history for multiple symbols.
+    try:
+        if str(executor_mode or "").upper() == "SIM" and hasattr(api, "ensure_sim_scanner_started"):
+            api.ensure_sim_scanner_started()
+    except Exception:
+        pass
+
     return api
