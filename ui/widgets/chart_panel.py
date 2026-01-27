@@ -206,6 +206,12 @@ class ChartPanel(ttk.Frame):
 
             self._last_draw_ts = 0.0
 
+            # Perf caches / draw scheduling (avoid UI freeze from draw churn)
+            self._pending_draw = None   # after_idle id (prevent draw queue explosion)
+            self._xtick_cache = None    # (key, xticks, xlabels)
+            self._rsi_cache = None      # (key, values)
+            self._perf_log_ts = 0.0
+
             # Data holders
             self._candles: List[dict] = []
             self._prices: List[float] = []
@@ -242,7 +248,11 @@ class ChartPanel(ttk.Frame):
                     spine.set_color(self.theme.grid)
                 ax.grid(True, color=self.theme.grid, alpha=0.25, linewidth=0.8)
 
-            # Performance: indicator axes are managed manually (avoid autoscale churn)
+            # Performance: axes are managed manually (avoid autoscale churn)
+            try:
+                self.ax_price.set_autoscale_on(False)
+            except Exception:
+                pass
             try:
                 self.ax_rsi.set_autoscale_on(False)
                 self.ax_rsi.set_ylim(0, 100)
@@ -299,6 +309,7 @@ class ChartPanel(ttk.Frame):
             # MACD ylim cache (manual + throttled to avoid tick/layout churn)
             self._macd_ylim_cache = None  # type: ignore  # (lo, hi)
             self._last_macd_ylim_ts = 0.0
+
 
         def _clear_candles_artists(self) -> None:
             """Clear candle artists.
@@ -509,10 +520,24 @@ class ChartPanel(ttk.Frame):
             if drop_left:
                 self._candles = self._candles[drop_left:]
 
-            # Throttle redraw
+            # Smart throttle (bigger payload => slower redraw)
             # IMPORTANT: do NOT queue repeated after() draws (can accumulate and freeze UI)
             now = time.time()
-            if now - self._last_draw_ts < 0.15:
+            try:
+                n = len(candles)
+            except Exception:
+                n = 0
+
+            # Adaptive interval: 200+ candles with indicators is heavy on TkAgg
+            min_interval = 0.10
+            if n >= 200:
+                min_interval = 0.25
+            elif n >= 120:
+                min_interval = 0.18
+            elif n >= 60:
+                min_interval = 0.14
+
+            if now - self._last_draw_ts < min_interval:
                 return
             self._last_draw_ts = now
 
@@ -601,11 +626,6 @@ class ChartPanel(ttk.Frame):
                 except Exception:
                     pass
 
-                try:
-                    self.canvas.draw_idle()
-                except Exception:
-                    pass
-                return
 
             # Render mode: FULL (candles) vs LIGHT (price line)
             mode = "FULL"
@@ -867,6 +887,7 @@ class ChartPanel(ttk.Frame):
             self.ax_price.set_xlim(-1.0, float(len(xs)) + 2.0)
 
             # Time-based X axis labels (HH:MM) using ts_open_ms
+            # PERF: cache tick labels; set_xticks/set_xticklabels is expensive in TkAgg
             try:
                 n = len(xs)
                 if n > 0 and ts_open_ms_list and len(ts_open_ms_list) == n:
@@ -880,22 +901,45 @@ class ChartPanel(ttk.Frame):
                     else:
                         step = 10
 
-                    xticks = []
-                    xlabels = []
-                    for i in range(0, n, step):
+                    # Cache key: only recompute when the visible time window changes
+                    ts0 = 0
+                    ts_last = 0
+                    try:
+                        ts0 = int(ts_open_ms_list[0] or 0)
+                    except Exception:
+                        ts0 = 0
+                    try:
+                        ts_last = int(ts_open_ms_list[-1] or 0)
+                    except Exception:
+                        ts_last = 0
+
+                    key = (n, step, ts0, ts_last)
+
+                    cached = getattr(self, "_xtick_cache", None)
+                    if cached and len(cached) == 3 and cached[0] == key:
+                        xticks = cached[1]
+                        xlabels = cached[2]
+                    else:
+                        xticks = []
+                        xlabels = []
+                        for i in range(0, n, step):
+                            try:
+                                ts_ms = int(ts_open_ms_list[i] or 0)
+                            except Exception:
+                                ts_ms = 0
+                            if ts_ms <= 0:
+                                continue
+                            try:
+                                dt = datetime.fromtimestamp(ts_ms / 1000.0)
+                                lab = dt.strftime("%H:%M")
+                            except Exception:
+                                lab = ""
+                            xticks.append(float(i))
+                            xlabels.append(lab)
                         try:
-                            ts_ms = int(ts_open_ms_list[i] or 0)
+                            self._xtick_cache = (key, xticks, xlabels)
                         except Exception:
-                            ts_ms = 0
-                        if ts_ms <= 0:
-                            continue
-                        try:
-                            dt = datetime.fromtimestamp(ts_ms / 1000.0)
-                            lab = dt.strftime("%H:%M")
-                        except Exception:
-                            lab = ""
-                        xticks.append(float(i))
-                        xlabels.append(lab)
+                            pass
 
                     # apply to all axes for consistency
                     for ax in (self.ax_price, self.ax_rsi, self.ax_macd):
@@ -907,10 +951,27 @@ class ChartPanel(ttk.Frame):
             except Exception:
                 pass
 
+
             # RSI + MACD (feature-flagged to reduce UI load)
             try:
                 if getattr(self, "_enable_rsi", True):
-                    rsi_vals = _rsi(closes, period=14)
+                    # PERF: cache RSI when closes window unchanged
+                    try:
+                        tail = closes[-40:] if len(closes) >= 40 else closes
+                        rsi_key = (len(closes), float(tail[0]) if tail else 0.0, float(tail[-1]) if tail else 0.0, tuple(round(x, 10) for x in tail))
+                    except Exception:
+                        rsi_key = None
+
+                    cached = getattr(self, "_rsi_cache", None)
+                    if cached and len(cached) == 2 and cached[0] == rsi_key:
+                        rsi_vals = cached[1]
+                    else:
+                        rsi_vals = _rsi(closes, period=14)
+                        try:
+                            self._rsi_cache = (rsi_key, rsi_vals)
+                        except Exception:
+                            pass
+
                     if rsi_vals:
                         xs_rsi = xs[-len(rsi_vals) :]
                         self._line_rsi.set_data(xs_rsi, rsi_vals)
@@ -1235,10 +1296,19 @@ class ChartPanel(ttk.Frame):
                 )
             except Exception:
                 pass
+            # PERF: prevent draw queue accumulation (TkAgg can freeze if draw_idle is spammed)
             try:
-                self.canvas.draw_idle()
+                if getattr(self, "_pending_draw", None) is not None:
+                    try:
+                        self.after_cancel(self._pending_draw)
+                    except Exception:
+                        pass
+                self._pending_draw = self.after_idle(self.canvas.draw_idle)
             except Exception:
-                pass
+                try:
+                    self.canvas.draw_idle()
+                except Exception:
+                    pass
 
         # ----------------------------- legacy API
 
