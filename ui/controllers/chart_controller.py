@@ -192,6 +192,52 @@ class ChartController:
         self._refresh_indicator_labels()
         self.apply_ui_indicators_to_embedded()
 
+    # ---------------------------------------------------------------- render mode (UI-only)
+
+    def _ui_render_mode(self) -> str:
+        """Return UI render mode: FULL or LIGHT (session-only)."""
+        try:
+            v = getattr(self.app, "var_chart_render_mode", None)
+            if v is None:
+                return "FULL"
+            m = str(v.get() or "").strip().upper()
+            return "LIGHT" if m in ("LIGHT", "L") else "FULL"
+        except Exception:
+            return "FULL"
+
+    def _refresh_render_label(self) -> None:
+        try:
+            lab = getattr(self.app, "var_chart_render_label", None)
+            if lab is not None:
+                lab.set(f"Render: {self._ui_render_mode()}")
+        except Exception:
+            pass
+
+    def apply_ui_render_to_embedded(self) -> None:
+        panel = getattr(self, "_embedded_panel", None)
+        if panel is None:
+            return
+        try:
+            if hasattr(panel, "set_render_mode"):
+                panel.set_render_mode(self._ui_render_mode())
+        except Exception:
+            return
+
+    def toggle_ui_render_mode(self) -> None:
+        """Toggle FULL <-> LIGHT (UI-only, no runtime writes)."""
+        try:
+            v = getattr(self.app, "var_chart_render_mode", None)
+            if v is None:
+                return
+            cur = str(v.get() or "").strip().upper()
+            new = "LIGHT" if cur not in ("LIGHT", "L") else "FULL"
+            v.set(new)
+        except Exception:
+            return
+
+        self._refresh_render_label()
+        self.apply_ui_render_to_embedded()
+
     def open_candles_embedded(self, timeframe_s: int = 60) -> None:
         """Chart-first: run LIVE candles inside embedded Chart tab (no pop-up)."""
         panel = self._ensure_embedded_panel()
@@ -206,6 +252,13 @@ class ChartController:
         except Exception:
             pass
         self.apply_ui_indicators_to_embedded()
+
+        # Apply current UI render mode immediately on open
+        try:
+            self._refresh_render_label()
+        except Exception:
+            pass
+        self.apply_ui_render_to_embedded()
 
         # mark running and store TF; reuse existing refresh loop via app.after
         self._embedded_running = True
@@ -238,6 +291,17 @@ class ChartController:
             try:
                 data = self.app._load_chart_ohlc(self._embedded_timeframe_s, max_candles=200, max_ticks=5000)
                 raw_candles = (data or {}).get("candles") or []
+
+                reason = ""
+                source = ""
+                try:
+                    reason = str((data or {}).get("reason") or "").strip()
+                except Exception:
+                    reason = ""
+                try:
+                    source = str((data or {}).get("source") or "").strip()
+                except Exception:
+                    source = ""
 
                 candles = []
                 debug_meta = None
@@ -297,10 +361,39 @@ class ChartController:
                                 "raw": len(raw_ts),
                                 "dupes": max(0, len(raw_ts) - len(uniq_ts)),
                                 "tf_ms": int(tf_ms),
+                                "reason": reason,
+                                "source": source,
                             }
                 except Exception:
                     candles = []
                     debug_meta = None
+
+                # Even with empty candles, show honest HUD (reason/source) in the panel (throttled)
+                if not candles:
+                    try:
+                        tf_ms_hint = int(self._embedded_timeframe_s) * 1000
+                        if tf_ms_hint <= 0:
+                            tf_ms_hint = 60_000
+                    except Exception:
+                        tf_ms_hint = 60_000
+
+                    try:
+                        if debug_meta is None:
+                            debug_meta = {"tf_ms": int(tf_ms_hint), "reason": reason, "source": source}
+                        else:
+                            debug_meta.setdefault("reason", reason)
+                            debug_meta.setdefault("source", source)
+                            debug_meta.setdefault("tf_ms", int(tf_ms_hint))
+                    except Exception:
+                        pass
+
+                    try:
+                        now_s = time.time()
+                        if (now_s - _last_render_at_s) * 1000.0 >= float(_throttle_ms):
+                            _last_render_at_s = now_s
+                            panel.plot_candles([], levels=None, trades=None, debug_meta=debug_meta)
+                    except Exception:
+                        pass
 
                 if candles:
                     # Levels

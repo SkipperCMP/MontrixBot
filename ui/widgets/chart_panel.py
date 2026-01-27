@@ -33,9 +33,12 @@ try:
     matplotlib.use("TkAgg")  # safe for Tk
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
+    from matplotlib.collections import PolyCollection, LineCollection
 except Exception:  # pragma: no cover
     FigureCanvasTkAgg = None  # type: ignore
     Figure = None  # type: ignore
+    PolyCollection = None  # type: ignore
+    LineCollection = None  # type: ignore
 
 
 # ----------------------------- helpers
@@ -239,6 +242,17 @@ class ChartPanel(ttk.Frame):
                     spine.set_color(self.theme.grid)
                 ax.grid(True, color=self.theme.grid, alpha=0.25, linewidth=0.8)
 
+            # Performance: indicator axes are managed manually (avoid autoscale churn)
+            try:
+                self.ax_rsi.set_autoscale_on(False)
+                self.ax_rsi.set_ylim(0, 100)
+            except Exception:
+                pass
+            try:
+                self.ax_macd.set_autoscale_on(False)
+            except Exception:
+                pass
+
             self.ax_price.set_title("Candles", color=self.theme.fg, fontsize=10, loc="left")
 
             self.canvas = FigureCanvasTkAgg(self.figure, master=self)
@@ -246,6 +260,10 @@ class ChartPanel(ttk.Frame):
 
             # Artists storage for cleanup
             self._candle_artists: list = []
+
+            # FAST CANDLES: collections for bodies and wicks (reused; never removed per-frame)
+            self._candle_bodies = None  # PolyCollection
+            self._candle_wicks = None   # LineCollection
 
             # Candles overlays (ENTRY / TP / SL) — artists removed on redraw
             self._level_artists: list = []
@@ -271,9 +289,37 @@ class ChartPanel(ttk.Frame):
             # MACD
             self._line_macd, = self.ax_macd.plot([], [], linewidth=1.0, alpha=0.9)
             self._line_signal, = self.ax_macd.plot([], [], linewidth=1.0, alpha=0.9)
+
+            # Legacy histogram bars (list of Rectangle) — kept for fallback only
             self._macd_hist = None
 
+            # FAST MACD histogram: 1 PolyCollection instead of 200+ bar objects
+            self._macd_hist_collection = None  # PolyCollection
+
+            # MACD ylim cache (manual + throttled to avoid tick/layout churn)
+            self._macd_ylim_cache = None  # type: ignore  # (lo, hi)
+            self._last_macd_ylim_ts = 0.0
+
         def _clear_candles_artists(self) -> None:
+            """Clear candle artists.
+            - FAST collections: reuse; just clear data + hide (NO remove()).
+            - Legacy artists: remove as before.
+            """
+            # Fast collections: clear data but keep objects
+            try:
+                if self._candle_bodies is not None:
+                    self._candle_bodies.set_verts([])
+                    self._candle_bodies.set_visible(False)
+            except Exception:
+                pass
+            try:
+                if self._candle_wicks is not None:
+                    self._candle_wicks.set_segments([])
+                    self._candle_wicks.set_visible(False)
+            except Exception:
+                pass
+
+            # Legacy: remove individual artists
             if not self._candle_artists:
                 return
             try:
@@ -359,6 +405,7 @@ class ChartPanel(ttk.Frame):
             except Exception:
                 pass
             try:
+                # Clear legacy bar objects
                 if getattr(self, "_macd_hist", None) is not None:
                     for b in self._macd_hist:
                         try:
@@ -366,6 +413,67 @@ class ChartPanel(ttk.Frame):
                         except Exception:
                             pass
                     self._macd_hist = None
+            except Exception:
+                pass
+
+            try:
+                # Hide fast histogram collection
+                if getattr(self, "_macd_hist_collection", None) is not None:
+                    try:
+                        self._macd_hist_collection.set_visible(False)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                # Reset MACD ylim cache (safe; recalculated when enabled)
+                self._macd_ylim_cache = None
+                self._last_macd_ylim_ts = 0.0
+            except Exception:
+                pass
+
+            # Redraw (best-effort)
+            try:
+                if getattr(self, "_use_mpl", False) and hasattr(self, "canvas"):
+                    self.canvas.draw_idle()
+            except Exception:
+                pass
+
+        def set_render_mode(self, mode: str) -> None:
+            """UI-only: FULL (candles) vs LIGHT (price line) to reduce matplotlib load."""
+            try:
+                m = str(mode or "").strip().upper()
+            except Exception:
+                m = "FULL"
+            m = "LIGHT" if m in ("LIGHT", "L") else "FULL"
+            try:
+                self._render_mode = m
+            except Exception:
+                pass
+
+            # Visibility: keep it simple; do NOT redefine MIX here (not in this build)
+            try:
+                if m == "LIGHT":
+                    # hide candle collections; show price line
+                    if self._candle_bodies is not None:
+                        self._candle_bodies.set_visible(False)
+                    if self._candle_wicks is not None:
+                        self._candle_wicks.set_visible(False)
+                    try:
+                        self._line_price.set_visible(True)
+                    except Exception:
+                        pass
+                else:
+                    # FULL: show collections (if exist); hide price line
+                    if self._candle_bodies is not None:
+                        self._candle_bodies.set_visible(True)
+                    if self._candle_wicks is not None:
+                        self._candle_wicks.set_visible(True)
+                    try:
+                        self._line_price.set_visible(False)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -402,13 +510,9 @@ class ChartPanel(ttk.Frame):
                 self._candles = self._candles[drop_left:]
 
             # Throttle redraw
+            # IMPORTANT: do NOT queue repeated after() draws (can accumulate and freeze UI)
             now = time.time()
-            if now - self._last_draw_ts < 0.05:
-                # schedule async draw
-                try:
-                    self.after(50, lambda: self.plot_candles(self._candles, levels=levels, trades=trades))
-                except Exception:
-                    pass
+            if now - self._last_draw_ts < 0.15:
                 return
             self._last_draw_ts = now
 
@@ -466,50 +570,176 @@ class ChartPanel(ttk.Frame):
                     ts_open_ms_list.append(0)
 
             if not xs:
+                # Honest HUD even when no candles were produced (bootstrap pending / no ticks / etc.)
+                try:
+                    r = ""
+                    s = ""
+                    try:
+                        if debug_meta:
+                            r = str(debug_meta.get("reason") or "").strip()
+                            s = str(debug_meta.get("source") or "").strip()
+                    except Exception:
+                        r = ""
+                        s = ""
+
+                    if r or s:
+                        msg = r if r else "NO_DATA"
+                        if s:
+                            msg = f"{msg} | {s}"
+                        txt = self.ax_price.text(
+                            0.01,
+                            0.98,
+                            msg,
+                            transform=self.ax_price.transAxes,
+                            ha="left",
+                            va="top",
+                            fontsize=9,
+                            zorder=50,
+                            bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.40),
+                        )
+                        self._hud_artists.append(txt)
+                except Exception:
+                    pass
+
                 try:
                     self.canvas.draw_idle()
                 except Exception:
                     pass
                 return
 
-            # Plot candles manually (rect + wick)
-            width = 0.65
-            for i in range(len(xs)):
-                x = xs[i]
-                o = opens[i]
-                h = highs[i]
-                l = lows[i]
-                c = closes[i]
+            # Render mode: FULL (candles) vs LIGHT (price line)
+            mode = "FULL"
+            try:
+                mode = str(getattr(self, "_render_mode", "FULL") or "").strip().upper()
+            except Exception:
+                mode = "FULL"
+            mode = "LIGHT" if mode in ("LIGHT", "L") else "FULL"
 
-                up = c >= o
-                col = self.theme.candle_up if up else self.theme.candle_dn
-                wick_col = self.theme.wick
-
-                # Wick
+            if mode == "LIGHT":
+                # Ultra-light: single price line (close) instead of many candle artists
                 try:
-                    ln = self.ax_price.plot([x, x], [l, h], color=wick_col, linewidth=1.0, alpha=0.9, zorder=2)[0]
-                    self._candle_artists.append(ln)
+                    self._line_price.set_data(xs, closes)
+                except Exception:
+                    pass
+            else:
+                # FULL: FAST CANDLES via collections (1 PolyCollection + 1 LineCollection)
+                width = 0.65
+
+                # Price line should not compete with candles in FULL
+                try:
+                    self._line_price.set_visible(False)
                 except Exception:
                     pass
 
-                # Body
-                y0 = min(o, c)
-                y1 = max(o, c)
+                # Prepare data for collections
+                verts = []         # PolyCollection bodies
+                face_colors = []   # body colors
+                wick_segments = [] # LineCollection segments (wicks)
+
+                for i in range(len(xs)):
+                    x = xs[i]
+                    o = opens[i]
+                    h = highs[i]
+                    l = lows[i]
+                    c = closes[i]
+
+                    up = c >= o
+                    body_color = self.theme.candle_up if up else self.theme.candle_dn
+
+                    left = x - width / 2.0
+                    right = x + width / 2.0
+                    bottom = min(o, c)
+                    top = max(o, c)
+                    height = max(1e-12, top - bottom)
+
+                    # Rectangle polygon (closed)
+                    verts.append([
+                        (left, bottom),
+                        (right, bottom),
+                        (right, bottom + height),
+                        (left, bottom + height),
+                        (left, bottom),
+                    ])
+                    face_colors.append(body_color)
+
+                    # Wick segment
+                    wick_segments.append([(x, l), (x, h)])
+
+                # Create or update collections (no per-candle artists)
                 try:
-                    rect = self.ax_price.add_patch(
-                        matplotlib.patches.Rectangle(
-                            (x - width / 2.0, y0),
-                            width,
-                            max(1e-12, y1 - y0),
-                            facecolor=col,
-                            edgecolor=col,
+                    if self._candle_bodies is None and PolyCollection is not None:
+                        self._candle_bodies = PolyCollection(
+                            verts,
+                            facecolors=face_colors,
+                            edgecolors=face_colors,
+                            linewidths=0.5,
                             alpha=0.95,
                             zorder=3,
                         )
-                    )
-                    self._candle_artists.append(rect)
+                        self.ax_price.add_collection(self._candle_bodies)
+                    elif self._candle_bodies is not None:
+                        self._candle_bodies.set_verts(verts)
+                        self._candle_bodies.set_facecolors(face_colors)
+                        self._candle_bodies.set_edgecolors(face_colors)
+                        self._candle_bodies.set_visible(True)
+
+                    if self._candle_wicks is None and LineCollection is not None:
+                        self._candle_wicks = LineCollection(
+                            wick_segments,
+                            colors=self.theme.wick,
+                            linewidths=1.0,
+                            alpha=0.9,
+                            zorder=2,
+                        )
+                        self.ax_price.add_collection(self._candle_wicks)
+                    elif self._candle_wicks is not None:
+                        self._candle_wicks.set_segments(wick_segments)
+                        # one color for all wicks (fast path)
+                        try:
+                            self._candle_wicks.set_color(self.theme.wick)
+                        except Exception:
+                            pass
+                        self._candle_wicks.set_visible(True)
+
                 except Exception:
-                    pass
+                    # Fallback: legacy rendering (rect + wick)
+                    width = 0.65
+                    for i in range(len(xs)):
+                        x = xs[i]
+                        o = opens[i]
+                        h = highs[i]
+                        l = lows[i]
+                        c = closes[i]
+
+                        up = c >= o
+                        col = self.theme.candle_up if up else self.theme.candle_dn
+                        wick_col = self.theme.wick
+
+                        # Wick
+                        try:
+                            ln = self.ax_price.plot([x, x], [l, h], color=wick_col, linewidth=1.0, alpha=0.9, zorder=2)[0]
+                            self._candle_artists.append(ln)
+                        except Exception:
+                            pass
+
+                        # Body
+                        y0 = min(o, c)
+                        y1 = max(o, c)
+                        try:
+                            rect = self.ax_price.add_patch(
+                                matplotlib.patches.Rectangle(
+                                    (x - width / 2.0, y0),
+                                    width,
+                                    max(1e-12, y1 - y0),
+                                    facecolor=col,
+                                    edgecolor=col,
+                                    alpha=0.95,
+                                    zorder=3,
+                                )
+                            )
+                            self._candle_artists.append(rect)
+                        except Exception:
+                            pass
 
             # EMA overlays
             ema20 = _ema(closes, period=20)
@@ -704,29 +934,146 @@ class ChartPanel(ttk.Frame):
                         self._line_macd.set_data(xs_macd, macd_line)
                         self._line_signal.set_data(xs_macd, signal_line)
 
-                        # hist bars (clear / redraw)
+                        # hist bars (FAST via PolyCollection): 1 object instead of 200+ bar objects
                         try:
-                            if self._macd_hist is not None:
-                                for b in self._macd_hist:
+                            if mode == "LIGHT":
+                                # In LIGHT mode skip histogram entirely
+                                try:
+                                    if self._macd_hist_collection is not None:
+                                        self._macd_hist_collection.set_visible(False)
+                                except Exception:
+                                    pass
+                                # remove legacy bars if any
+                                try:
+                                    if self._macd_hist is not None:
+                                        for b in self._macd_hist:
+                                            try:
+                                                b.remove()
+                                            except Exception:
+                                                pass
+                                    self._macd_hist = None
+                                except Exception:
+                                    pass
+                            else:
+                                # Build histogram rectangles as polygons
+                                width = 0.65
+                                verts = []
+                                colors = []
+                                for i, h in enumerate(hist):
+                                    x = xs_macd[i]
+                                    left = x - width / 2.0
+                                    right = x + width / 2.0
+                                    bottom = 0.0
+                                    top = float(h)
+
+                                    verts.append([
+                                        (left, bottom),
+                                        (right, bottom),
+                                        (right, top),
+                                        (left, top),
+                                        (left, bottom),
+                                    ])
+                                    colors.append(self.theme.hist_pos if top >= 0 else self.theme.hist_neg)
+
+                                # Create/update collection
+                                if self._macd_hist_collection is None and PolyCollection is not None:
+                                    self._macd_hist_collection = PolyCollection(
+                                        verts,
+                                        facecolors=colors,
+                                        edgecolors=colors,
+                                        linewidths=0.0,
+                                        alpha=0.65,
+                                        zorder=1,
+                                    )
+                                    self.ax_macd.add_collection(self._macd_hist_collection)
+                                elif self._macd_hist_collection is not None:
+                                    self._macd_hist_collection.set_verts(verts)
+                                    self._macd_hist_collection.set_facecolors(colors)
+                                    self._macd_hist_collection.set_edgecolors(colors)
+                                    self._macd_hist_collection.set_visible(True)
+
+                                # remove legacy bars if any
+                                try:
+                                    if self._macd_hist is not None:
+                                        for b in self._macd_hist:
+                                            try:
+                                                b.remove()
+                                            except Exception:
+                                                pass
+                                    self._macd_hist = None
+                                except Exception:
+                                    pass
+
+                                # Manual MACD ylim (throttled): include macd/signal/hist
+                                try:
+                                    lo = min(min(macd_line), min(signal_line), min(hist))
+                                    hi = max(max(macd_line), max(signal_line), max(hist))
+                                    span = hi - lo
+                                    pad = span * 0.15 if span > 0 else max(1e-6, abs(hi) * 0.20)
+
+                                    want_lo = float(lo - pad)
+                                    want_hi = float(hi + pad)
+
+                                    now2 = time.time()
+                                    cur = getattr(self, "_macd_ylim_cache", None)
+                                    cur_lo = None
+                                    cur_hi = None
                                     try:
-                                        b.remove()
+                                        if cur and len(cur) == 2:
+                                            cur_lo = float(cur[0])
+                                            cur_hi = float(cur[1])
+                                    except Exception:
+                                        cur_lo = None
+                                        cur_hi = None
+
+                                    must = False
+                                    try:
+                                        if cur_lo is None or cur_hi is None:
+                                            must = True
+                                        elif want_lo < cur_lo or want_hi > cur_hi:
+                                            must = True
+                                        elif now2 - float(getattr(self, "_last_macd_ylim_ts", 0.0) or 0.0) > 0.80:
+                                            must = True
+                                    except Exception:
+                                        must = True
+
+                                    if must:
+                                        try:
+                                            self.ax_macd.set_ylim(want_lo, want_hi)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self._macd_ylim_cache = (want_lo, want_hi)
+                                            self._last_macd_ylim_ts = now2
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                        except Exception:
+                            # Fallback to legacy bar() if PolyCollection fails
+                            try:
+                                colors = [self.theme.hist_pos if h >= 0 else self.theme.hist_neg for h in hist]
+                                if getattr(self, "_macd_hist", None) is not None and len(self._macd_hist) == len(hist):
+                                    for b, h, c in zip(self._macd_hist, hist, colors):
+                                        try:
+                                            b.set_height(h)
+                                            b.set_color(c)
+                                        except Exception:
+                                            pass
+                                else:
+                                    try:
+                                        if self._macd_hist is not None:
+                                            for b in self._macd_hist:
+                                                try:
+                                                    b.remove()
+                                                except Exception:
+                                                    pass
                                     except Exception:
                                         pass
-                                self._macd_hist = None
-                        except Exception:
-                            pass
-                        try:
-                            bars = []
-                            for i in range(len(hist)):
-                                h = hist[i]
-                                x = xs_macd[i]
-                                col = self.theme.hist_pos if h >= 0 else self.theme.hist_neg
-                                bar = self.ax_macd.bar([x], [h], width=0.65, alpha=0.65, color=col)
-                                for b in bar:
-                                    bars.append(b)
-                            self._macd_hist = bars
-                        except Exception:
-                            pass
+                                    container = self.ax_macd.bar(xs_macd, hist, width=0.65, alpha=0.65, color=colors)
+                                    self._macd_hist = list(container)
+                            except Exception:
+                                pass
                     else:
                         self._line_macd.set_data([], [])
                         self._line_signal.set_data([], [])
@@ -744,6 +1091,37 @@ class ChartPanel(ttk.Frame):
                             self._macd_hist = None
                     except Exception:
                         pass
+            except Exception:
+                pass
+
+            # Honest HUD (bootstrap / source / reason) — top-right
+            try:
+                r = ""
+                s = ""
+                try:
+                    if debug_meta:
+                        r = str(debug_meta.get("reason") or "").strip()
+                        s = str(debug_meta.get("source") or "").strip()
+                except Exception:
+                    r = ""
+                    s = ""
+
+                if r or s:
+                    msg = r if r else "OK"
+                    if s:
+                        msg = f"{msg} | {s}"
+                    txt = self.ax_price.text(
+                        0.99,
+                        0.98,
+                        msg,
+                        transform=self.ax_price.transAxes,
+                        ha="right",
+                        va="top",
+                        fontsize=9,
+                        zorder=50,
+                        bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.35),
+                    )
+                    self._hud_artists.append(txt)
             except Exception:
                 pass
 
@@ -941,6 +1319,7 @@ class ChartPanel(ttk.Frame):
             self._line_price.set_data([], [])
 
             try:
+                # Clear legacy bar objects
                 if self._macd_hist is not None:
                     for b in self._macd_hist:
                         try:
@@ -948,6 +1327,26 @@ class ChartPanel(ttk.Frame):
                         except Exception:
                             pass
                     self._macd_hist = None
+            except Exception:
+                pass
+
+            try:
+                # Hide fast histogram collection (reuse later)
+                if getattr(self, "_macd_hist_collection", None) is not None:
+                    try:
+                        self._macd_hist_collection.set_verts([])
+                    except Exception:
+                        pass
+                    try:
+                        self._macd_hist_collection.set_visible(False)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                self._macd_ylim_cache = None
+                self._last_macd_ylim_ts = 0.0
             except Exception:
                 pass
 
@@ -1006,29 +1405,122 @@ class ChartPanel(ttk.Frame):
                 self._line_macd.set_data(xs_macd, macd_line)
                 self._line_signal.set_data(xs_macd, signal_line)
 
-                # hist bars (clear / redraw)
+                # hist bars (FAST via PolyCollection)
                 try:
-                    if self._macd_hist is not None:
-                        for b in self._macd_hist:
+                    width = 0.65
+                    verts = []
+                    colors = []
+                    for i, h in enumerate(hist):
+                        x = xs_macd[i]
+                        left = x - width / 2.0
+                        right = x + width / 2.0
+                        bottom = 0.0
+                        top = float(h)
+                        verts.append([
+                            (left, bottom),
+                            (right, bottom),
+                            (right, top),
+                            (left, top),
+                            (left, bottom),
+                        ])
+                        colors.append(self.theme.hist_pos if top >= 0 else self.theme.hist_neg)
+
+                    if self._macd_hist_collection is None and PolyCollection is not None:
+                        self._macd_hist_collection = PolyCollection(
+                            verts,
+                            facecolors=colors,
+                            edgecolors=colors,
+                            linewidths=0.0,
+                            alpha=0.65,
+                            zorder=1,
+                        )
+                        self.ax_macd.add_collection(self._macd_hist_collection)
+                    elif self._macd_hist_collection is not None:
+                        self._macd_hist_collection.set_verts(verts)
+                        self._macd_hist_collection.set_facecolors(colors)
+                        self._macd_hist_collection.set_edgecolors(colors)
+                        self._macd_hist_collection.set_visible(True)
+
+                    # remove legacy bars if any
+                    try:
+                        if self._macd_hist is not None:
+                            for b in self._macd_hist:
+                                try:
+                                    b.remove()
+                                except Exception:
+                                    pass
+                        self._macd_hist = None
+                    except Exception:
+                        pass
+
+                    # Manual MACD ylim (throttled)
+                    try:
+                        lo = min(min(macd_line), min(signal_line), min(hist))
+                        hi = max(max(macd_line), max(signal_line), max(hist))
+                        span = hi - lo
+                        pad = span * 0.15 if span > 0 else max(1e-6, abs(hi) * 0.20)
+                        want_lo = float(lo - pad)
+                        want_hi = float(hi + pad)
+
+                        now2 = time.time()
+                        cur = getattr(self, "_macd_ylim_cache", None)
+                        cur_lo = None
+                        cur_hi = None
+                        try:
+                            if cur and len(cur) == 2:
+                                cur_lo = float(cur[0])
+                                cur_hi = float(cur[1])
+                        except Exception:
+                            cur_lo = None
+                            cur_hi = None
+
+                        must = False
+                        try:
+                            if cur_lo is None or cur_hi is None:
+                                must = True
+                            elif want_lo < cur_lo or want_hi > cur_hi:
+                                must = True
+                            elif now2 - float(getattr(self, "_last_macd_ylim_ts", 0.0) or 0.0) > 0.80:
+                                must = True
+                        except Exception:
+                            must = True
+
+                        if must:
                             try:
-                                b.remove()
+                                self.ax_macd.set_ylim(want_lo, want_hi)
                             except Exception:
                                 pass
-                        self._macd_hist = None
+                            try:
+                                self._macd_ylim_cache = (want_lo, want_hi)
+                                self._last_macd_ylim_ts = now2
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
-                    pass
-                try:
-                    bars = []
-                    for i in range(len(hist)):
-                        h = hist[i]
-                        x = xs_macd[i]
-                        col = self.theme.hist_pos if h >= 0 else self.theme.hist_neg
-                        bar = self.ax_macd.bar([x], [h], width=0.65, alpha=0.65, color=col)
-                        for b in bar:
-                            bars.append(b)
-                    self._macd_hist = bars
-                except Exception:
-                    pass
+                    # Fallback to legacy per-bar redraw
+                    try:
+                        if self._macd_hist is not None:
+                            for b in self._macd_hist:
+                                try:
+                                    b.remove()
+                                except Exception:
+                                    pass
+                            self._macd_hist = None
+                    except Exception:
+                        pass
+                    try:
+                        bars = []
+                        for i in range(len(hist)):
+                            h = hist[i]
+                            x = xs_macd[i]
+                            col = self.theme.hist_pos if h >= 0 else self.theme.hist_neg
+                            bar = self.ax_macd.bar([x], [h], width=0.65, alpha=0.65, color=col)
+                            for b in bar:
+                                bars.append(b)
+                        self._macd_hist = bars
+                    except Exception:
+                        pass
             else:
                 self._line_macd.set_data([], [])
                 self._line_signal.set_data([], [])

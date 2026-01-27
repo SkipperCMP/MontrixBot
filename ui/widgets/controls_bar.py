@@ -152,6 +152,20 @@ def build_topbar_ui(app: Any, symbols: Sequence[str]) -> None:
     if not hasattr(app, "var_chart_macd_label"):
         app.var_chart_macd_label = tk.StringVar(value="MACD: ON")
 
+    # --- UI toggle: Render mode (FULL/LIGHT) (session-only, READ-ONLY) ---
+    if not hasattr(app, "var_chart_render_mode"):
+        raw_mode = str(os.environ.get("MB_UI_CHART_RENDER_MODE", "FULL")).strip().upper()
+        raw_mode = "LIGHT" if raw_mode in ("LIGHT", "L") else "FULL"
+        app.var_chart_render_mode = tk.StringVar(value=raw_mode)
+
+    if not hasattr(app, "var_chart_render_label"):
+        try:
+            m = str(getattr(app, "var_chart_render_mode").get() or "").strip().upper()
+        except Exception:
+            m = "FULL"
+        m = "LIGHT" if m == "LIGHT" else "FULL"
+        app.var_chart_render_label = tk.StringVar(value=f"Render: {m}")
+
     # Статус переносим в ОТДЕЛЬНУЮ строку под кнопками.
     status_row = ttk.Frame(app, style="Dark.TFrame")
     status_row.pack(fill="x", padx=8, pady=(0, 6))
@@ -498,4 +512,11 @@ def build_paths_ui(app: Any) -> None:
         textvariable=app.var_chart_macd_label,
         style="Dark.TButton",
         command=getattr(app.chart_controller, "toggle_ui_macd", None),
+    ).pack(side="left", padx=4)
+
+    ttk.Button(
+        box,
+        textvariable=app.var_chart_render_label,
+        style="Dark.TButton",
+        command=getattr(app.chart_controller, "toggle_ui_render_mode", None),
     ).pack(side="left", padx=4)
